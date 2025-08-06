@@ -1,10 +1,11 @@
+#include "libote_wrap.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
 #include <math.h>
 #include <sodium.h>
-#include <tomcrypt.h>
-#include <tommath.h>
+#include <pthread.h>
 
 bool verbose;
 int n, L, FF_size; //n = number of clients, L = bitlength per client
@@ -14,84 +15,40 @@ struct dabit{
 	int a;
 };
 
+int oblivious_transfer(int x1, int x2, bool c){
+	if(c) return x2; else return x1;}
+
 //finite field conversion, (%) operator close but doesn't deal with negatives properly
 int FF_convert(int x){
 	if(x >= 0) return x % FF_size;
 	else return (x % FF_size) + FF_size;
 }
 
-int oblivious_transfer(int x, int x2, bool choice_bit){
-	/*
-	//s1 generates RSA key 
-	int err, hash_idx, prng_idx, res;
-	unsigned long l1, l2;
-	unsigned char pt[16], pt2[16];
-	unsigned char out [2048];
-	rsa_key key, public_key, private_key;
-	
-	if(register_prng(&sprng_desc) == -1){
-		printf("Error registering sprng");
-		return EXIT_FAILURE; //fix error handling!!
-	}
-
-	ltc_mp = ltm_desc;
-
-	if(register_hash(&sha1_desc) == -1){
-		printf("Error registering sha1");
-		return EXIT_FAILURE;
-	}
-
-	hash_idx = find_hash("sha1");
-	prng_idx = find_prng("sprng");
-
-	if((err = rsa_make_key(NULL, prng_idx, 128/8, 65537, &key)) != CRYPT_OK){
-		printf("rsa_make_key %s", error_to_string(err));
-		return EXIT_FAILURE;
-	}
-	
-	if((err = rsa_export(out, &l1, PK_PUBLIC, &key)) != CRYPT_OK){
-		printf("rsa_export %s", error_to_string(err));
-		return EXIT_FAILURE;
-	}
-
-	//s1 sends pk to s2
-	//s1 generates random x0 and x1 and sends them to s2
-	char x0_buf [4], x1_buf [4];;
-        randombytes_buf(x0_buf, 4);
-	uint32_t x0 = randombytes_uniform((int)pow(2, 32)); //need to check appropriate integer size!
-        randombytes_buf(x1_buf, 4);
-	uint32_t x1 = randombytes_uniform((int)pow(2, 32));
-	
-	//s2 generates choice bit randomly, as well as its own blinding value 'k'
-	char c_buf, k_buf[32];
-	randombytes_buf(c_buf, 1);
-	bool c = randombytes_uniform(2);
-	randombytes_buf(k_buf, 32);
-	uint32_t k = randombytes_uniform((int)pow(2, 32));
-
-	//s2 calculates v = (x_c + k^e) mod N
-	int v = c? (x1 + k^e) % N: (x0 + k^e) % N;
-	*/
-	if(choice_bit)return x2;
-	else return x;
-
+void* OTeSendThread(void* arg){
+	void** unpack = (void**)arg;
+	uint16_t* messages1 = (uint16_t*)unpack[0];
+	uint16_t* messages2 = (uint16_t*)unpack[1];
+	int size = *(int*)unpack[2];
+	OTeSend(messages1, messages2, size);
+	return NULL;
+	//	Y2[i] = oblivious_transfer(X[i], FF_convert(X[i] + B1[i]), B2[i]);
 }
 
 //dabitgen algorithm according to [1] but parallelised
-void generate_dabits(struct dabit * s1_dabits, struct dabit * s2_dabits){
+void generate_dabits(struct dabit* s1_dabits, struct dabit* s2_dabits){
 	//s1 chooses n random bits B1
 	int min_bytes = ceil(n/8.0);	//need to increase capacity for more clients!! 
-	bool B1 [n];
-	char r1_buf [min_bytes];
+	uint16_t B1[n];
+	char r1_buf[min_bytes];
         randombytes_buf(r1_buf, min_bytes);
 	uint32_t r1 = randombytes_uniform((int)pow(2, n));
 	for(int i = 0; i < n; i++)
 		B1[i] = (r1 >> i) & 1;
 
 	//s1 chooses n random field elements X and sets y1 = -x mod p for each one 	
-	uint32_t X [n];
-	int Y1 [n]; 
-	char x_buf[32];	//32 byte finite field size should be fine
+	uint16_t X[n];
+	uint16_t Y1[n]; 
+	char x_buf[32];	//32 byte max finite field size should be fine
 	for(int i = 0; i < n; i++){
 		randombytes_buf(x_buf, 32);
 		X[i] = randombytes_uniform(FF_size);
@@ -99,27 +56,43 @@ void generate_dabits(struct dabit * s1_dabits, struct dabit * s2_dabits){
 	}
 
 	//s2 chooses n random bits B2
-	bool B2 [n];
-	char r2_buf [min_bytes];
+	uint16_t B2[n]; //choices
+	char r2_buf[min_bytes];
         randombytes_buf(r2_buf, min_bytes);
 	uint32_t r2 = randombytes_uniform((int)pow(2, n));
 	for(int i = 0; i < n; i++)
 		B2[i] = (r2 >> i) & 1;
 	
 	//s1 acts as OT sender, sending (x, x + b1), s2 acts as receiver with choice bit b2
-	int Y2 [n];
+	uint16_t Y2[n]; 
+	uint8_t output[n * 8];
+	//for(int i = 0; i < n; i++)
+	//	Y2[i] = oblivious_transfer(X[i], FF_convert(X[i] + B1[i]), B2[i]);
+	pthread_t thread2;
+	uint16_t messages2 [n];
 	for(int i = 0; i < n; i++)
-		Y2[i] = oblivious_transfer(X[i], FF_convert(X[i] + B1[i]), B2[i]);
+		messages2[i] = FF_convert(X[i] + B1[i]);
+	void* arg[3];
+	arg[0] = X; //messages1
+	arg[1] = messages2;
+	arg[2] = &n;
 	
+	pthread_create(&thread2, NULL, OTeSendThread, arg);
+	OTeRecv(output, B2, n);
+	pthread_join(thread2, NULL);
+	
+	for(int i = 0; i < n; i++)
+		Y2[i] = output[i * 8];
+
 	//both servers compute a_i = b_i - 2*y_i and output values
-	int A1 [n];
+	uint16_t A1[n];
 	for(int i = 0; i < n; i++){
 		A1[i] = FF_convert(B1[i] - (2 * Y1[i]));
 		s1_dabits[i].b = B1[i];
 		s1_dabits[i].a = A1[i];
 	}
 
-	int A2 [n];
+	uint16_t A2[n];
 	for(int i = 0; i < n; i++){
 		A2[i] = FF_convert(B2[i] - (2 * Y2[i]));
 		s2_dabits[i].b = B2[i];
@@ -134,7 +107,8 @@ void generate_beaver_triples(bool* s1_triples, bool* s2_triples, int batch_size)
 	int total_bytes = ceil((double)total_bits / 8);
 	
 	//server 1 samples 'batch_size' bit doubles (a1, b2) plus 'batch_size' random bits R1 for the OTs
-	char s1_buffer[total_bytes], s1_R [batch_size];
+	char s1_buffer[total_bytes];
+	uint16_t s1_R[batch_size];
 	randombytes_buf(s1_buffer, total_bytes);
 
 	//random number of suitable length using intermediate variable r_i, not to be confused with R
@@ -150,7 +124,8 @@ void generate_beaver_triples(bool* s1_triples, bool* s2_triples, int batch_size)
 	}
 
 	//server 2 samples n bit doubles in exactly the same way
-	char s2_buffer[total_bytes], s2_R [batch_size];
+	char s2_buffer[total_bytes];
+	uint16_t s2_R[batch_size];
 	randombytes_buf(s2_buffer, total_bytes);
 	uint32_t r2 = randombytes_uniform(2 * (int)pow(2, total_bits));
 	
@@ -161,19 +136,59 @@ void generate_beaver_triples(bool* s1_triples, bool* s2_triples, int batch_size)
 		s2_R[i] = (r2 >> (j + 2)) & 1;
 	}
 
-	//perform OTs
-	bool x1, x2;
+	//perform 2 OTs
+	pthread_t send_thread1, send_thread2;
+	void* arg1[3], * arg2[3];
+	arg1[0] = s1_R; //messages1 for first OT
+	arg2[0] = s2_R;	//messages1 for second OT
+	uint16_t messages2_1[batch_size], messages2_2[batch_size];
+	for(int i = 0; i < batch_size; i++){
+		messages2_1[i] = s1_R[i] ^ s1_triples[3 * i];	//messages2 for first OT
+		messages2_2[i] = s2_R[i] ^ s2_triples[3 * i];	//messages2 for second OT
+	}
+	
+	arg1[1] = messages2_1;
+	arg2[1] = messages2_2;
+	arg1[2] = &batch_size;
+	arg2[2] = &batch_size;	
+	
+	uint8_t output1[batch_size * 8], output2[batch_size * 8];
+	uint16_t choices1[batch_size], choices2[batch_size];
+	
+	for(int i = 0; i < batch_size; i++){
+		choices1[i] = s2_triples[(i * 3) + 1];
+		choices2[i] = s1_triples[(i * 3) + 1];
+	}
+
+	pthread_create(&send_thread1, NULL, OTeSendThread, arg1);
+	OTeRecv(output1, choices1, batch_size);
+	pthread_join(send_thread1, NULL);
+	
+	pthread_create(&send_thread2, NULL, OTeSendThread, arg2);
+	OTeRecv(output2, choices2, batch_size);
+	pthread_join(send_thread2, NULL);
+	
+	bool X1[batch_size], X2[batch_size];
+	for(int i = 0; i < batch_size; i++){
+		j = i * 8;
+		X1[i] = output1[j];
+		X2[i] = output2[j];
+	}
+
 	for(int i = 0; i < batch_size; i++){
 		j = 3 * i;
 		//server 1 acts as the sender, sending (r1, r1 ^ a1)
 		//server 2 selects with b2 to learn x2 = a1b2 ^ r1
-		x2 = oblivious_transfer(s1_R[i], s1_R[i] ^ s1_triples[j], s2_triples[j + 1]);	
+		
+		//x2 = oblivious_transfer(s1_R[i], s1_R[i] ^ s1_triples[j], s2_triples[j + 1]);	
+		
+		
 		//server 2 calculates c2 as follows, according to the standard protocol [2]
-		s2_triples[j + 2] =  x2 ^ s2_R[i] ^ (s2_triples[j] * s2_triples[j + 1]);
+		s2_triples[j + 2] =  X2[i] ^ s2_R[i] ^ (s2_triples[j] * s2_triples[j + 1]);
 
 		//now reverse roles
-		x1 = oblivious_transfer(s2_R[i], s2_R[i] ^ s2_triples[j], s1_triples[j + 1]);	
-		s1_triples[j + 2] = x1 ^ s1_R[i] ^ (s1_triples[j] * s1_triples[j + 1]);
+		//x1 = oblivious_transfer(s2_R[i], s2_R[i] ^ s2_triples[j], s1_triples[j + 1]);	
+		s1_triples[j + 2] = X1[i] ^ s1_R[i] ^ (s1_triples[j] * s1_triples[j + 1]);
 	}
 
 }
@@ -265,92 +280,64 @@ int aggregate_1D(int* array){ //aggregate a 1D array where every value is to be 
 
 //D_i is each server's boolean share of the client data, I_i is the computed intersection shares
 void intersect(bool* D1, bool* D2, bool * T1, bool* T2, bool* Z1, bool* Z2, int* intersect_indices, int index_len, int total_bits){
+	int j = 0;
+	int no_rounds = (int)ceil(log2(index_len));
 
-	int j;
-	bool d1, d2, d, e1, e2, e;
+	//intermediate array so we don't destroy client data
+	//may as well use 2D array instead of flattened 1D since only used locally anyway
+	bool I1[n][L], I2[n][L];
+	for(int i = 0; i < n; i++)
+		for(int ii = 0; ii < L; ii++){
+			I1[i][ii] = D1[j];
+			I2[i][ii] = D2[j++];
+		}
 
-	for(int i = 0; i < n; i++){	
-		j = 3*i;
-		//server 1 computes intermediate values d1 = x1 - a1
-		d1 = D1[i*L + intersect_indices[0]] ^ T1[j];
-		//e1 = y1 - b1
-		e1 = D1[i*L + intersect_indices[1]] ^ T1[j + 1];
+	j = 0;
+	int jcheckpoint;
+	int index1, index2, spacing;
+	int no_pairs = index_len;
+	bool D1_buf[n], D2_buf[n], E1_buf[n], E2_buf[n], D[n], E[n]; //buffers for d1, d2,... values
+	
+	for(int round = 0; round < no_rounds; round++){
+		no_pairs = index_len / 2; //e.g. if we have 7 indices, we have 3 pairs and 1 leftover
+		index_len -= no_pairs;
+		spacing = (int)pow(2, round);
+		//printf("%d\n", no_pairs);
+		for(int pair = 0; pair < no_pairs; pair++){
+			index1 = intersect_indices[2*pair*spacing]; //first index of the pair 
+			index2 = intersect_indices[spacing*(2*pair + 1)]; //second index of the pair 
+			jcheckpoint = j;
+			for(int i = 0; i < n; i++){
+				//server 1 computes intermediate values d1 = x1 - a1
+				D1_buf[i] = I1[i][index1] ^ T1[j];
+				//e1 = y1 - b1
+				E1_buf[i] = I1[i][index2] ^ T1[j + 1];
 
-		//server 2 does likewise
-		d2 = D2[i*L + intersect_indices[0]] ^ T2[j];
-		e2 = D2[i*L + intersect_indices[1]] ^ T2[j + 1];
-
-		//servers publish shares
-		d = d1 ^ d2;
-		e = e1 ^ e2;
-
-		//server 1 computes z1 as d*b1 + e*a1 + c1
-		Z1[i] = d*T1[j + 1] ^ e*T1[j] ^ T1[j + 2];
-		//server 2 computes z2 as d*e + d*b2 + e*a2 + c2
-		Z2[i] = d*e ^ d*T2[j + 1] ^ e*T2[j] ^ T2[j + 2];
-	}
-
-	for(int I = 2; I < index_len - 1; I++){
-		for(int i = 0; i < n; i++){
-			j = 3*i;
-			
-			//the following is the 'readable' version of the for loop
-			/*
-
-			//server 1 prepares variables
-			x1 = D1[i*L + bits_to_intersect[0]];
-			y1 = D1[i*L + bits_to_intersect[1]];
-			a1 = T1[j];
-			b1 = T1[j + 1];
-			c1 = T1[j + 2];
-
-			//server 1 computes intermediate values
-			d1 = x1 ^ a1;
-			e1 = y1 ^ b1;
-
-			//server 2 prepares variables
-			x2 = D2[i*L + bits_to_intersect[0]];
-			y2 = D2[i*L + bits_to_intersect[1]];
-			a2 = T2[j];
-			b2 = T2[j + 1];
-			c2 = T2[j + 2];
-
-			//server 2 computes intermediate values
-			d2 = x2 ^ a2;
-			e2 = y2 ^ b2;
-
-			//servers publish e and d shares
-			d = d1 ^ d2;
-			e = e1 ^ e2;
-
-			//server 1 computes z1 as d*b1 + e*a1 + c1
-			z1 = d*b1 ^ e*a1 ^ c1;
-			//server 2 computes z2 as d*e + d*b2 + e*a2 + c2
-			z2 = d*e ^ d*b2 ^ e*a2 ^ c2;
-
-			Z1[i] = z1;
-			Z2[i] = z2;*/
-			
-			//server 1 computes intermediate values d1 = x1 - a1
-			d1 = Z1[i] ^ T1[I*j];
-			//e1 = y1 - b1
-			e1 = D1[i*L + intersect_indices[I]] ^ T1[I*j + 1];
-
-			//server 2 does likewise
-			d2 = Z2[i] ^ T2[I*j];
-			e2 = D2[i*L + intersect_indices[I]] ^ T2[I*j + 1];
-
-			//servers publish shares
-			d = d1 ^ d2;
-			e = e1 ^ e2;
-
-			//server 1 computes z1 as d*b1 + e*a1 + c1
-			Z1[i] = d*T1[I*j + 1] ^ e*T1[I*j] ^ T1[I*j + 2];
-			//server 2 computes z2 as d*e + d*b2 + e*a2 + c2
-			Z2[i] = d*e ^ d*T2[I*j + 1] ^ e*T2[I*j] ^ T2[I*j + 2];
+				//server 2 does similarly
+				D2_buf[i] = I2[i][index1] ^ T2[j];
+				E2_buf[i] = I2[i][index2] ^ T2[j + 1];
+				j += 3;
+			}
+			j = jcheckpoint;
+			//servers publish shares, i.e. server 1 sends D1_buf and E1_buf, server 2 similarly
+			for(int i = 0; i < n; i++){
+				//now we assume both servers have all parts to reconstruct D and E, and thus both calculate:
+				D[i] = D1_buf[i] ^ D2_buf[i];
+				E[i] = E1_buf[i] ^ E2_buf[i];
+				//server 1 computes z1 as d*b1 + e*a1 + c1 and stores it in intermediate array I
+				I1[i][index1] = D[i]*T1[j + 1] ^ E[i]*T1[j] ^ T1[j + 2];
+				//server 2 computes z2 as d*e + d*b2 + e*a2 + c2
+				I2[i][index1] = D[i]*E[i] ^ D[i]*T2[j + 1] ^ E[i]*T2[j] ^ T2[j + 2];
+				j += 3;
+			}
 		}
 	}
-
+	
+	//finish by setting the return arrays Z to the first index of the intermediate array
+	for(int i = 0; i < n; i++){
+		Z1[i] = I1[i][intersect_indices[0]];
+		Z2[i] = I2[i][intersect_indices[0]];
+	}
 } 
 
 int main(int argc, char* argv[]){
@@ -387,12 +374,7 @@ int main(int argc, char* argv[]){
 		L = L_test;
 		total_bits = n * L;
 
-		mp_int x;
-		if(mp_init_u32(&x, n + 1) != MP_OKAY)
-			printf("error with mp_next_prime\n");
-		if(mp_prime_next_prime(&x, 100, false) != MP_OKAY)
-			printf("error with mp_next_prime\n");
-		FF_size = mp_get_u32(&x);
+		FF_size = n + 1;
 		printf("FF_size = %d\n", FF_size);
 			
 	}	
@@ -473,18 +455,18 @@ int main(int argc, char* argv[]){
 	}
 
 	int no_of_multis = n * (index_len - 1); //number of multiplications
-	bool T1 [3 * no_of_multis], T2 [3 * no_of_multis]; //T is the set of beaver triples
-	bool Z1 [n], Z2 [n];
+	bool T1[3 * no_of_multis], T2[3 * no_of_multis]; //T is the set of beaver triples
+	bool Z1[n], Z2[n];
 	generate_beaver_triples(T1, T2, no_of_multis);
 
-	struct dabit s1_dabits [n]; //server 1 share of dabits
-	struct dabit s2_dabits [n]; //likewise
+	struct dabit s1_dabits[n]; //server 1 share of dabits
+	struct dabit s2_dabits[n]; //likewise
 
 	generate_dabits(s1_dabits, s2_dabits);
 	
 	intersect(D1, D2, T1, T2, Z1, Z2, intersection_indices, index_len, no_of_multis); 
 	
-	int Z1_arith [n], Z2_arith [n]; //arithmetic shares of the intersection values, Z1 and Z2
+	int Z1_arith[n], Z2_arith[n]; //arithmetic shares of the intersection values, Z1 and Z2
 
 	b2a_convert(Z1_arith, Z2_arith, Z1, Z2, s1_dabits, s2_dabits);
 	
@@ -495,3 +477,62 @@ int main(int argc, char* argv[]){
 
 	return 0;	
 }
+
+			//the following is the 'readable' version of the for loop
+			/*
+
+			//server 1 prepares variables
+			x1 = D1[i*L + bits_to_intersect[0]];
+			y1 = D1[i*L + bits_to_intersect[1]];
+			a1 = T1[j];
+			b1 = T1[j + 1];
+			c1 = T1[j + 2];
+
+			//server 1 computes intermediate values
+			d1 = x1 ^ a1;
+			e1 = y1 ^ b1;
+
+			//server 2 prepares variables
+			x2 = D2[i*L + bits_to_intersect[0]];
+			y2 = D2[i*L + bits_to_intersect[1]];
+			a2 = T2[j];
+			b2 = T2[j + 1];
+			c2 = T2[j + 2];
+
+			//server 2 computes intermediate values
+			d2 = x2 ^ a2;
+			e2 = y2 ^ b2;
+
+			//servers publish e and d shares
+			d = d1 ^ d2;
+			e = e1 ^ e2;
+
+			//server 1 computes z1 as d*b1 + e*a1 + c1
+			z1 = d*b1 ^ e*a1 ^ c1;
+			//server 2 computes z2 as d*e + d*b2 + e*a2 + c2
+			z2 = d*e ^ d*b2 ^ e*a2 ^ c2;
+
+			Z1[i] = z1;
+			Z2[i] = z2;*/
+			
+	/*for(int i = 0; i < 0; i++){	
+		j = 3*i;
+		//server 1 computes intermediate values d1 = x1 - a1
+		d1 = D1[i*L + intersect_indices[0]] ^ T1[j];
+		//e1 = y1 - b1
+		e1 = D1[i*L + intersect_indices[1]] ^ T1[j + 1];
+
+		//server 2 does likewise
+		d2 = D2[i*L + intersect_indices[0]] ^ T2[j];
+		e2 = D2[i*L + intersect_indices[1]] ^ T2[j + 1];
+
+		//servers publish shares
+		d = d1 ^ d2;
+		e = e1 ^ e2;
+
+		//server 1 computes z1 as d*b1 + e*a1 + c1
+		Z1[i] = d*T1[j + 1] ^ e*T1[j] ^ T1[j + 2];
+		//server 2 computes z2 as d*e + d*b2 + e*a2 + c2
+		Z2[i] = d*e ^ d*T2[j + 1] ^ e*T2[j] ^ T2[j + 2];
+	}*/
+
