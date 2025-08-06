@@ -90,5 +90,5 @@ void OTeRecv(uint8_t* retMsgs, const uint16_t* choices, const int noOTs){
 		//retMsgs[i] = recvMsgs[i];
 	}
 }
-} // extern "C"
+} 
 
