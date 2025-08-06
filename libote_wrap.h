@@ -13,5 +13,4 @@ void OTeRecv(uint8_t* retMsgs, const uint16_t* choices, const int noOTs);
 #ifdef __cplusplus
 }
 #endif
-#endif // LIBOTE_WRAP_H
-
+#endif
