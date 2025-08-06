@@ -15,9 +15,6 @@ struct dabit{
 	int a;
 };
 
-int oblivious_transfer(int x1, int x2, bool c){
-	if(c) return x2; else return x1;}
-
 //finite field conversion, (%) operator close but doesn't deal with negatives properly
 int FF_convert(int x){
 	if(x >= 0) return x % FF_size;
