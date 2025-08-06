@@ -1,4 +1,3 @@
-// libote_wrapper.h
 #ifndef LIBOTE_WRAP_H
 #define LIBOTE_WRAP_H
 #include <stdint.h>
