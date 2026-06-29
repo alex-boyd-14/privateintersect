@@ -69,9 +69,11 @@ static int recv_hello(){
     return 0;
 }
 
-static int recv_query_response(){
+static int recv_query_response(bool b){
+    int fd = b? s2_fd: s1_fd;
     uint8_t buf[1];
-    int rc = recv_all(s1_fd, buf, sizeof(buf));
+    int rc = recv_all(fd, buf, sizeof(buf));
+    printf("response = %d\n", buf[0]);
     if (rc != 0) return rc;
     return buf[0];
 }
@@ -339,10 +341,29 @@ int query_data(){
     if (send_8(s2_fd, s2_send_buf, msg_len) != 0)
         perror("send to s2 failed");
     printf("query sent to servers\n");
-    bool result = recv_query_response();
-    if(result)
+    uint8_t s1_result = recv_query_response(0);
+    uint8_t s2_result = recv_query_response(1);
+    if(s1_result < 0){
+        fprintf(stderr, "error: rc = %d\n", s1_result);
+        return -1;
+    }
+    if(s1_result > 1){
+        fprintf(stderr, "error: response from s1 greater than 1\n");
+        return -1;
+    }
+    if(s2_result < 0){
+        fprintf(stderr, "error: rc = %d\n", s2_result);
+        return -1;
+    }
+    if(s2_result > 1){
+        fprintf(stderr, "error: response from s2 greater than 1\n");
+        return -1;
+    }
+    bool final_result = s1_result ^ s2_result;
+    if(final_result)
         printf("you are vulnerable\n");
     else printf("you are not vulnerable\n");
+    return 0;
 }
 
 int main(int argc, char* argv[]){

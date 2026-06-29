@@ -53,7 +53,7 @@ void printbyte(uint8_t byte){
     printf("\n");
 }
 
-void printvec(int* v, int len){
+void print32vec(uint32_t *v, int len){
     for(int i = 0; i < len; i++)
         printf("%d ", v[i]);
     printf("\n");
@@ -68,7 +68,7 @@ int bitsize(int x){
 }
 
 //finite field conversion, (%) operator doesn't deal with negatives properly
-int FF_convert(uint64_t x, uint64_t FF){
+int FF_convert(int x, int FF){
 	if(x >= 0) return x % FF;
 	else return ((x % FF) + FF) % FF;
 }
@@ -88,7 +88,7 @@ void random_bool_vector(bool* v, int l){
 }
 
 //create random vector v of length l where each coordinate is an element of GF(FF)
-void random_vector(uint32_t* v, int l, uint32_t FF){
+void random_vector(uint32_t *v, int l, uint64_t FF){
     uint32_t maxinclusive = FF - 1;
     int x = 1, y = 0;
     int byte = 0, bit = 0;

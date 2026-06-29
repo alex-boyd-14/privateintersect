@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "libote_wrap.h"
+#include "gc_wrap.h"
 #include "aux.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +27,7 @@
 #include <sys/eventfd.h>
 #define SPORT 8080
 #define CPORT 8081
+#define GCPORT 1212
 
  
  /*send and receive code */
@@ -61,9 +63,9 @@ static int          active_count       = 0;  // increment on accept, decrement o
 /* Batch size for the htonl/ntohl conversion loop in send/recv.
  * 256 elements = 1 KB on the stack, regardless of the total array size. */
  
-#define THRESHOLD 100
+#define THRESHOLD 2
 static bool verbose, cout, light;
-uint32_t m, L, line, expon, FF_size = 20; //(1ULL << 20ULL) - 1; //n = number of records, m = number of attributes, L = bitlength per attribute, line = record bitlength
+static uint32_t m, L, line, expon, FF_size = 17; //(1ULL << 20ULL) - 1; //n = number of records, m = number of attributes, L = bitlength per attribute, line = record bitlength
 volatile int n = 0, nbytes;
 double artificial_delay = 0., RTT = 0.05; //50ms delay to send data
 bool benchmarking = false;
@@ -71,8 +73,8 @@ const int rsize = 3;
 static int self_fd, s2_fd;
 static int exchange_eventfd = -1;
 
-const static int extra_buf_space = 00000;
-static int remaining_buf_space = extra_buf_space;
+// const static int extra_buf_space = 100000;
+// static int remaining_buf_space = extra_buf_space;
 static uint8_t *D;
 static int D1_cols;
 #define D1(r, c) D[(r) * D1_cols + (c)]
@@ -360,7 +362,7 @@ static int s2_connect(){
 }
 
 static int s2_hello(){
-    int buf_size = 7;
+    int buf_size = 8;
     uint32_t helloBuf[buf_size];
     helloBuf[0] = n;
     helloBuf[1] = m;
@@ -369,6 +371,7 @@ static int s2_hello(){
     helloBuf[4] = cout;
     helloBuf[5] = light;
     helloBuf[6] = FF_size;
+    helloBuf[7] = THRESHOLD;
     if(send_32(s2_fd, helloBuf, buf_size) != 0)
         return -1;
     printf("Finished server_hello\n");
@@ -454,7 +457,7 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
     
     uint8_t (*d1)[nbytes_fixed] = malloc(initsize), (*e1)[nbytes_fixed] = malloc(initsize);
     uint8_t (*d2)[nbytes_fixed] = NULL, (*e2)[nbytes_fixed] = NULL; // should get malloc'ed by recv()
-    uint8_t (*d)[nbytes_fixed] = d2, (*e)[nbytes_fixed] = e2; // will reuse from d2 and e2
+    uint8_t (*d)[nbytes_fixed] = NULL, (*e)[nbytes_fixed] = NULL; // will reuse from d2 and e2
     if(!d1 || !e1){
         fprintf(stderr, "could not allocate d or e arrays\n");
         return -1;
@@ -472,6 +475,7 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
             index1 = intersect_indices[index] * L + subindex;
             index2 = subindex + 1 == L? intersect_indices[index + 1] * L: index1 + 1;
             if(alt_D){
+                printf("using altD\n");
                 //server 1 computes intermediate values d1 = x1 - a1
                 d1[pair][i] = alt_D[index1][i] ^ (255 * t[index * L + subindex]) ^ T1[0][j];
                 //e1 = y1 - b1
@@ -536,6 +540,8 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
             e[pair][i] = e1[pair][i] ^ e2[pair][i];
             //server 1 computes z1 as d*b1 + e*a1 + c1
             I1[pair][i] = (d[pair][i] & T1[1][j]) ^ (e[pair][i] & T1[0][j]) ^ T1[2][j];
+            free(d2);
+            free(e2);
             //server 2 computes z2 as d*e + d*b2 + e*a2 + c2
             //I2[pair][i] = (d[pair][i] & e[pair][i]) ^ (d[pair][i] & T2[1][j]) ^ (e[pair][i] & T2[0][j]) ^ T2[2][j];
             j++;
@@ -545,11 +551,12 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
     if(uneven){
         int leftoverindex = (intersect_indices[index_len - 1] + 1) * L - 1;
         for(int i = 0; i < nbytes_fixed; i++){
-            if(alt_D)
-                I1[no_pairs][i] = alt_D[leftoverindex][i] ^ (255 * t[index * L + subindex]);
+            if(alt_D){ printf("using altD\n");
+                I1[no_pairs][i] = alt_D[leftoverindex][i] ^ (255 * t[index * L + subindex]); }
             else I1[no_pairs][i] = D1(leftoverindex, i) ^ (255 * t[index * L + subindex]);
         }
     }
+
     int jcheckpoint, spacing;
     int no_rounds = (int)ceil(log2(l));
     for(int round = 0; round < no_rounds; round++){
@@ -605,6 +612,8 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
                 e[pair][i] = e1[pair][i] ^ e2[pair][i];
                 //server 1 computes z1 as d*b1 + e*a1 + c1
                 I1[index1][i] = (d[pair][i] & T1[1][j]) ^ (e[pair][i] & T1[0][j]) ^ T1[2][j];
+                free(d2);
+                free(e2);
                 //server 2 computes z2 as d*e + d*b2 + e*a2 + c2
                 //I2[index1][i] = (d[pair][i] & e[pair][i]) ^ (d[pair][i] & T2[1][j]) ^ (e[pair][i] & T2[0][j]) ^ T2[2][j];
                 j++;
@@ -617,11 +626,8 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
         fprintf(stderr, "error reallocating Z1\n");
         return -1;
     }
-    
     free(d1);
     free(e1);
-    free(d2);
-    free(e2);
     return 0;
 }
 
@@ -652,6 +658,7 @@ static void cout_size_reduction(int batch_bytes, int max_depth, uint8_t (*R)[bat
             }
         }
     }
+    if(verbose) printf("finished cout_size_reduction()\n");
 }
 
 static void cout_product_sharing(int batch_bytes, uint8_t (*r)[batch_bytes * 8], uint8_t (*a)[batch_bytes * 8], uint8_t **msgs1, uint8_t *msgs2, int noOTs_bytes){
@@ -666,7 +673,7 @@ static void cout_product_sharing(int batch_bytes, uint8_t (*r)[batch_bytes * 8],
     for(int i = 0; i < batch_bytes; i++)
         for(int j = 0; j < expon; j++)
             msgs2[c++] = a[j][i] ^ r[j][i];
-
+    if(verbose) printf("finished cout_product_sharing()\n");
 }
 
 static int couteauPrepSR(int batch_bytes, int max_depth, uint8_t (*R)[batch_bytes], uint32_t (*A)[batch_bytes * 8], int *js, int *js_acc){
@@ -682,7 +689,8 @@ static int couteauPrepSR(int batch_bytes, int max_depth, uint8_t (*R)[batch_byte
     if(max_depth < 1)
         return -1;
     
-    uint32_t *msgs1_SR = malloc(4 * noOTs_SR), *msgs2_SR = malloc(4 * noOTs_SR);
+    printf("noOTs_SR = %d\n", noOTs_SR);
+    uint32_t *msgs1_SR = malloc(noOTs_SR * sizeof(uint32_t)), *msgs2_SR = malloc(noOTs_SR * sizeof(uint32_t));
     if(!msgs1_SR || !msgs2_SR){
         printf("error allocating msgs1 or msgs2\n");
         return -1;
@@ -693,6 +701,7 @@ static int couteauPrepSR(int batch_bytes, int max_depth, uint8_t (*R)[batch_byte
 
     free(msgs1_SR);
     free(msgs2_SR);
+    if(verbose) printf("finished couteauPrepSR()\n");
     return 0;
 }
 
@@ -700,10 +709,10 @@ static int couteauPrepPS(int batch_bytes, uint8_t (*r)[batch_bytes], uint8_t (*a
 
     int batch_size = batch_bytes * 8;
     int noOTs_PS = expon * batch_size, noOTs_PS_bytes = expon * batch_bytes;
-    uint8_t *msgs1_PS = NULL, *msgs2_PS = malloc(noOTs_PS_bytes);
+    uint8_t *msgs1_PS = NULL, *msgs2_PS = malloc(noOTs_PS_bytes * sizeof(uint8_t));
 
-    if(!msgs1_PS || !msgs2_PS){
-        printf("error allocating msgs1 or msgs2\n");
+    if(!msgs2_PS){
+        printf("error allocating msgs2\n");
         return -1;
     }
 
@@ -711,13 +720,13 @@ static int couteauPrepPS(int batch_bytes, uint8_t (*r)[batch_bytes], uint8_t (*a
     OTeSend1(msgs1_PS, msgs2_PS, noOTs_PS);
 
     free(msgs2_PS);
+    if(verbose) printf("finished couteauPrepPS()\n");
     return 0;
 }
 
 static int couteauPrep(int batch_bytes, int max_depth, uint8_t (*R)[batch_bytes], uint32_t (*A)[batch_bytes * 8], uint8_t (*r)[batch_bytes], uint8_t (*a)[batch_bytes], int *js, int *js_acc){
-
     if(js[0] < 2){
-        printf("skipping couteauprep\n");
+        printf("skipping couteauPrep()\n");
         return 0;
     }
 
@@ -726,12 +735,31 @@ static int couteauPrep(int batch_bytes, int max_depth, uint8_t (*R)[batch_bytes]
             fprintf(stderr, "failure in couteauPrepSR()\n");
             return -1;
         }
-    } else R = NULL, A = NULL;
+    } else{ printf("skipping size_reduction\n"); R = NULL, A = NULL; }
 
     if(couteauPrepPS(batch_bytes, r, a) == -1){
         fprintf(stderr, "failure in couteauPrepPS()\n");
         return -1;
-    } else r = NULL, a = NULL;
+    }
+
+    if(verbose) printf("finished couteauPrep()\n");
+    return 0;
+}
+
+static int couteauHybridPrep(int batch_bytes, int max_depth, uint8_t (*R)[batch_bytes], uint32_t (*A)[batch_bytes * 8], int *js, int *js_acc){
+    if(js[0] < 2){
+        printf("skipping couteauHybridPrep()\n");
+        return 0;
+    }
+
+    if(max_depth > 0){  // if (need to do size reduction)
+        if(couteauPrepSR(batch_bytes, max_depth, R, A, js, js_acc) == -1){
+            fprintf(stderr, "failure in couteauPrepSR()\n");
+            return -1;
+        }
+    } else{ printf("skipping size_reduction\n"); R = NULL, A = NULL; }
+
+    if(verbose) printf("finished couteauHybridPrep()\n");
     return 0;
 }
 
@@ -750,15 +778,16 @@ static int couteauSR(int n_fixed, int max_depth, uint8_t (**XS)[tobytes(n_fixed)
     
     int indexlen = l / L;
     int acc;
-    
+
     //server1 sets x1 = x for every record
     for(int i = 0; i < nbytes_fixed; i++)
         for(int j = 0; j < indexlen; j++)
             for(int k = 0; k < L; k++)
                 xs[j * L + k][i] = D1(intersect_indices[j] * L + k, i) ^ (255 * t[j * L + k]);
 
-    if(l == 1){
+    if(l == 1 || max_depth == 0){
         *XS = realloc(xs, nbytes_fixed);
+        printf("skipping size reduction\n");
         return 0;
     }
     for(int depth = 0; depth < max_depth; depth++){
@@ -813,19 +842,27 @@ static int couteauSR(int n_fixed, int max_depth, uint8_t (**XS)[tobytes(n_fixed)
     }
     *XS = &xs[js_acc[max_depth]];
     XS = realloc(xs, rsize * nbytes_fixed);
+    if(verbose) printf("finished couteauSR()\n");
     return 0;
 }
 
 static int couteauPS(int n_fixed, int max_depth, uint8_t **Z1, uint8_t (*XS)[tobytes(n_fixed)], uint8_t (*r)[tobytes(n_fixed)], uint8_t (*a)[tobytes(n_fixed)]){
 
+
     int nbytes_fixed = tobytes(n_fixed);
     bool I[expon][rsize];
     powset(rsize, I, expon);
     //server1
-    uint8_t *alpha = malloc(nbytes_fixed), *beta = NULL,
-    (*Alpha)[nbytes_fixed] = malloc(nbytes_fixed * expon), (*Beta)[nbytes_fixed] = NULL,
-    (*EX)[nbytes_fixed] = malloc(nbytes_fixed * expon);
 
+    *Z1 = malloc(nbytes_fixed * sizeof(uint8_t));
+    if(!Z1){
+        printf("could not allocate Z1\n");
+        return -1;
+    }
+
+    uint8_t *alpha = malloc(nbytes_fixed), *beta = NULL,
+    (*Alpha)[nbytes_fixed] = malloc(nbytes_fixed * expon * sizeof(uint8_t)), (*Beta)[nbytes_fixed] = NULL,
+    (*EX)[nbytes_fixed] = malloc(nbytes_fixed * expon * sizeof(uint8_t));
     if(!alpha || !Alpha || !EX){
         printf("could not allocate alpha, Alpha or EX\n");
         return -1;
@@ -844,7 +881,6 @@ static int couteauPS(int n_fixed, int max_depth, uint8_t **Z1, uint8_t (*XS)[tob
         }
     }
     randombytes_buf(alpha, nbytes_fixed);
-
 
     //servers send each other alpha and beta (+Alpha and Beta)
     uint8_t *recv_arr;
@@ -883,13 +919,12 @@ static int couteauPS(int n_fixed, int max_depth, uint8_t **Z1, uint8_t (*XS)[tob
         *Z1[i] = acc1 ^ acc2 ^ alpha[i] ^ beta[i];
     }
 
-
     free(XS);
     free(alpha);
     free(beta);
     free(Alpha);
     free(Beta);
-
+    if(verbose) printf("finished couteauPS()\n");
     return 0;
 }
 
@@ -906,6 +941,7 @@ static int couteauHybridET(int n_fixed, int max_depth, uint8_t **Z1, uint8_t (*R
 
     int ret = intersect(n_fixed, rsize, rsize, no_multis_bytes, XS, T1, Z1, intersect_indices, t);
     free(XS);
+    if(verbose) printf("finished couteauHybridET()\n");
     return ret;
 }
 
@@ -916,14 +952,17 @@ static int couteauET(int n_fixed, int max_depth, uint8_t **Z1, uint8_t (*R)[toby
     int nbytes_fixed = tobytes(n_fixed);
     uint8_t (*XS)[nbytes_fixed] = NULL;
 
-    if(couteauSR(n_fixed, max_depth, &XS, R, A, intersect_indices, t, js, js_acc) == -1){
-        fprintf(stderr, "failure in couteauSR\n");
-        return -1;
+    if(max_depth > 0){  // if (need to do size reduction)
+        if(couteauSR(n_fixed, max_depth, &XS, R, A, intersect_indices, t, js, js_acc) == -1){
+            fprintf(stderr, "failure in couteauSR\n");
+            return -1;
+        }
     }
     if(couteauPS(n_fixed, max_depth, Z1, XS, r, a) == -1){
         fprintf(stderr, "failure in couteauPS\n");
         return -1;
     }
+    if(verbose) printf("finished couteauET()\n");
     return 0;
 }
 
@@ -937,9 +976,9 @@ static int generate_dabits(int batch_bytes, uint8_t *B1, uint32_t *A1){
     
 	//s1 chooses n random bits B1
     randombytes_buf(B1, batch_bytes);
-    
+
 	//s1 chooses n random field elements X and sets y1 = -x mod p for each one
-    uint32_t* X = malloc(batch_size * sizeof(uint32_t));
+    uint32_t *X = malloc(batch_size * sizeof(uint32_t));
     if(!X){
         printf("could not allocate X\n");
         return -1;
@@ -954,7 +993,6 @@ static int generate_dabits(int batch_bytes, uint8_t *B1, uint32_t *A1){
 
 	//s1 acts as OT sender, sending (x, x + b1), s2 acts as receiver with choice bit b2
     uint32_t *messages1 = X;
-    printf("messages1[1] = %d\n", messages1[1]);
     uint32_t *messages2 = malloc(batch_size * sizeof(uint32_t));
     if(!messages2){
         printf("could not allocate message2\n");
@@ -980,7 +1018,7 @@ static int generate_dabits(int batch_bytes, uint8_t *B1, uint32_t *A1){
         }
         A1[i] = FF_convert((B1[byte] >> bit++ & 1) - (2 * A1[i]), FF_size);
     }
-    printf("finished generating dabits\n");
+    if(verbose) printf("finished generating dabits\n");
     return 0;
 }
 
@@ -990,7 +1028,7 @@ static int generate_beaver_triples(int batch_bytes, uint8_t (*T1)[batch_bytes]){
     if(batch_size == 0)
         return 0;
 	//server 1 samples 'batch_size' bit doubles (a1, b1) plus 'batch_size' random bits R1 for the OTs
-    uint8_t* s1_R = malloc(batch_bytes);
+    uint8_t *s1_R = malloc(batch_bytes * sizeof(uint8_t));
     if(!s1_R){
         printf("could not allocate space\n");
         return -1;
@@ -1001,8 +1039,8 @@ static int generate_beaver_triples(int batch_bytes, uint8_t (*T1)[batch_bytes]){
     //server 2 does the same
     
 	//perform 2 OTs
-    uint8_t *messages1 = s1_R, *messages2 = malloc(batch_bytes);
-    uint8_t *choices = T1[1], *output = malloc(batch_bytes);
+    uint8_t *messages1 = s1_R, *messages2 = malloc(batch_bytes * sizeof(uint8_t));
+    uint8_t *choices = T1[1], *output = malloc(batch_bytes * sizeof(uint8_t));
 
     if(!messages2 || !output){
         printf("could not allocate space for messages2 or output\n");
@@ -1026,7 +1064,7 @@ static int generate_beaver_triples(int batch_bytes, uint8_t (*T1)[batch_bytes]){
     free(messages1);
     free(messages2);
     free(output);
-    printf("finished generating beaver triples\n");
+    if(verbose) printf("finished generating beaver triples\n");
     return 0;
 }
 
@@ -1044,12 +1082,12 @@ static int b2a_convert(int n_fixed, uint32_t *output1, uint8_t *input1, uint8_t 
 	//servers share V in the clear
     uint8_t *recv_arr;
     uint64_t count;
-    if(send_8(s2_fd, (uint8_t *)V1, nbytes_fixed) != 0){
+    if(send_8(s2_fd, V1, nbytes_fixed) != 0){
         fprintf(stderr, "send V1 to s2 failed\n");
         return -1;
     }
     if(receive_8(s2_fd, &recv_arr, &count) == 0 && count == nbytes_fixed)
-        V2 = (void *)recv_arr;
+        V2 = recv_arr;
     else{
         fprintf(stderr, "receive V2 from s2 failed\n");
         return -1;
@@ -1078,24 +1116,22 @@ static int client_update(connection_t *c, uint8_t *arr, uint64_t count){
     if(count == linebytes + 1){
         int nbyte, nbit;
         int byte = 0, bit = 0;
-        if(remaining_buf_space == 0){
-            D = realloc(D, (D1_cols + extra_buf_space) * line);
+        indextobyteandbit(&nbyte, &nbit, n++);
+        int oldnbyte = nbytes;
+        nbytes = tobytes(n);
+        if(nbytes > oldnbyte){
+            D1_cols++;
+            D = realloc(D, D1_cols * line);
             if(!D){
                 printf("error reallocating D1\n");
                 return -1;
             }
-            D1_cols += extra_buf_space;
-            remaining_buf_space = extra_buf_space;
         }
         if(n + 1 > FF_size){
-            fprintf(stderr, "fatal error: n bigger than FF_size\n");
+            fprintf(stderr, "n bigger than FF_size\n");
+            FF_size++;
             return -1;
         }
-        indextobyteandbit(&nbyte, &nbit, n++);
-        int oldnbyte = nbytes;
-        nbytes = tobytes(n);
-        if(nbytes > oldnbyte)
-            remaining_buf_space--;
         for(int i = 0; i < line; i++){
             if(bit > 7){
                 bit = 0;
@@ -1151,6 +1187,7 @@ static void* client_query_thread(void *arg){
         printf("failed to generate dabits\n");
         return NULL;
     }
+
     uint8_t *Z1 = NULL;
 
     if(cout){
@@ -1191,8 +1228,8 @@ static void* client_query_thread(void *arg){
                     fprintf(stderr, "error in generate_beaver_triples()\n");
                     return NULL;
                 }
-                if(couteauPrepSR(nbytes_fixed, depth, R, A, js, js_acc) == -1){
-                    fprintf(stderr, "error in couteauPrepSR()\n");
+                if(couteauHybridPrep(nbytes_fixed, depth, R, A, js, js_acc) == -1){
+                    fprintf(stderr, "error in couteauPrep()\n");
                     return NULL;
                 }
                 if(couteauHybridET(n_fixed, depth, &Z1, R, A, no_multis_bytes, T1, intersection_indices, t, js, js_acc) == -1){
@@ -1211,8 +1248,8 @@ static void* client_query_thread(void *arg){
         }
         else{   //coutfull
             if(!benchmarking){
-                uint8_t (*R)[nbytes_fixed] = malloc(nbytes_fixed * noOTs_j);
-                uint32_t (*A)[nbytes_fixed * 8] = malloc(4 * nbytes_fixed * 8 * noOTs_j);
+                uint8_t (*R)[nbytes_fixed] = malloc(nbytes_fixed * noOTs_j * sizeof(uint8_t));
+                uint32_t (*A)[nbytes_fixed * 8] = malloc((8 * nbytes_fixed) * noOTs_j * sizeof(uint32_t));
                 if(!R || !A){
                     fprintf(stderr, "could not allocate R or A\n");
                     return NULL;
@@ -1280,6 +1317,8 @@ static void* client_query_thread(void *arg){
         }
     }
 
+    //printboolvec(Z1, n_fixed);
+
     uint32_t *Z1_arith = malloc(n_fixed * sizeof(uint32_t));//arithmetic shares of the intersection values, Z1 and Z2
     if(!Z1_arith){
         fprintf(stderr, "could not allocate Z1_arith\n");
@@ -1287,28 +1326,17 @@ static void* client_query_thread(void *arg){
     }
 
 	b2a_convert(n_fixed, Z1_arith, Z1, dab1B, dab1A);
-
     free(Z1);
     free(dab1B);
     free(dab1A);
 
-	uint32_t grand_total, s2_total, s1_total = aggregate_1D(Z1_arith, FF_size, n_fixed);
-
+	uint32_t s1_total = aggregate_1D(Z1_arith, FF_size, n_fixed);
+    printf("s1_total = %d\n", s1_total);
     free(Z1_arith);
 
-    uint32_t *finaltest_arr;
-    uint64_t finaltest_count;
-    if(receive_32(s2_fd, &finaltest_arr, &finaltest_count) == 0 && finaltest_count == 1)
-        s2_total = finaltest_arr[0];
-    else{
-        fprintf(stderr, "receive s2_total from s2 failed\n");
-        return NULL;
-    }
-
-    grand_total = s1_total + s2_total;
-	printf("the grand total is %d\n", FF_convert(grand_total, FF_size));
     uint8_t *response = malloc(1 * sizeof(uint8_t));
-    response[0] = grand_total <= THRESHOLD;
+    response[0] = gc_threshold_check(1, s1_total, FF_size, THRESHOLD, NULL, GCPORT);
+    //printf("%d\n", response[0]);
 
     free(args->arr);
     free(args);
@@ -1324,6 +1352,7 @@ static void* client_query_thread(void *arg){
 
     uint64_t val = 1;
     eventfd_write(exchange_eventfd, val);
+    printf("n = %d\n", n_fixed);
 
     return NULL;
 }
@@ -1429,7 +1458,7 @@ static void handle_write(connection_t *c){
     while (c->write_head) {
         write_chunk_t *chunk = c->write_head;
 
-        while (chunk->off < chunk->len) {
+        while (chunk->off < chunk->len){
             ssize_t en = send(c->fd,
                              chunk->buf + chunk->off,
                              chunk->len - chunk->off, 0);
@@ -1709,7 +1738,7 @@ int main(int argc, char* argv[]){
     if(s2_hello() == -1)
         return -1;
     nbytes = tobytes(n);
-    D1_cols = nbytes + extra_buf_space;
+    D1_cols = nbytes;
     D = malloc(D1_cols * line);
     if(!D){
         printf("could not allocate D1\n");
