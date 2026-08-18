@@ -79,6 +79,14 @@ static uint8_t *D;
 static int D2_cols;
 #define D2(r, c) D[(r) * D2_cols + (c)]
 
+//bencmarking...
+double univ_start = 0, univ_end = 0, univ_final;
+
+typedef enum {
+    INTERSECT_FULL = 0,
+    INTERSECT_MINUS,
+} intersect_version_t;
+
 typedef enum {
     CONN_FREE = 0,
     CONN_ACTIVE,
@@ -145,6 +153,7 @@ typedef struct {
 
 static result_queue_t  result_queue       = {NULL, NULL};
 static pthread_mutex_t result_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
+static const intersect_version_t intersect_version = INTERSECT_FULL;
 
 static connection_t conn_table[MAX_CONNECTIONS];
 static int          epoll_fd  = -1;
@@ -429,17 +438,18 @@ static int print_records(){
 }
 
 //D_i is each server's boolean share of the record data, I_i is the computed intersection shares
-static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*alt_D)[tobytes(n_fixed)], uint8_t (*T2)[no_multis_bytes], uint8_t **Z2, int *intersect_indices, bool *t){
+static int intersectminus(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*alt_D)[tobytes(n_fixed)], uint8_t (*T2)[no_multis_bytes], uint8_t **Z2, int *intersect_indices, bool *t){
     int nbytes_fixed = tobytes(n_fixed);
     int lhalf = l - (l / 2);
-    int initsize = lhalf * nbytes_fixed;
+    int initsize = lhalf * nbytes_fixed * sizeof(uint8_t);
+    int de_size = (l / 2) * nbytes_fixed * sizeof(uint8_t);
     uint8_t (*I2)[nbytes_fixed] = malloc(initsize);
     if(!I2){
         fprintf(stderr, "could not allocate I1\n");
         return -1;
     }
     
-    uint8_t (*d2)[nbytes_fixed] = malloc(initsize), (*e2)[nbytes_fixed] = malloc(initsize);
+    uint8_t (*d2)[nbytes_fixed] = malloc(de_size), (*e2)[nbytes_fixed] = malloc(de_size);
     uint8_t (*d1)[nbytes_fixed] = NULL, (*e1)[nbytes_fixed] = NULL; // should get malloc'ed by recv()
     uint8_t (*d)[nbytes_fixed] = NULL, (*e)[nbytes_fixed] = NULL; // will reuse from d2 and e2
     if(!d2 || !e2){
@@ -452,13 +462,14 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
     int no_pairs = l / 2; //e.g. if we have 7 indices, we have 3 pairs and 1 leftover
     bool uneven = no_pairs * 2 != l;
     l -= no_pairs;
-    
+
     int index = 0, subindex = 0, j = 0;
     for(int pair = 0; pair < no_pairs; pair++){
         for(int i = 0; i < nbytes_fixed; i++){
             index1 = intersect_indices[index] * L + subindex;
             index2 = subindex + 1 == L? intersect_indices[index + 1] * L: index1 + 1;
             if(alt_D){
+                //printf("using altD\n");
                 d2[pair][i] = alt_D[index1][i] ^ (255 * t[index * L + subindex]) ^ T2[0][j] ^ 255;
                 e2[pair][i] = alt_D[index2][i] ^ (255 * t[index * L + subindex + 1]) ^ T2[1][j++] ^ 255;
             }
@@ -478,11 +489,10 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
             index++;
         }
     }
-
     uint8_t *recv_arr;
     uint64_t count;
 
-    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == initsize){
+    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == de_size){
         d1 = (void *)recv_arr;
         d = d1;
     }
@@ -490,12 +500,12 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
         fprintf(stderr, "receive d1 from s1 failed\n");
         return -1;
     }
-    if(send_8(s1_fd, (uint8_t *)d2, initsize) != 0){
+    if(send_8(s1_fd, (uint8_t *)d2, de_size) != 0){
         fprintf(stderr, "send d2 to s1 failed\n");
         return -1;
     }
 
-    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == initsize){
+    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == de_size){
         e1 = (void *)recv_arr;
         e = e1;
     }
@@ -504,11 +514,10 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
         return -1;
     }
 
-    if(send_8(s1_fd, (uint8_t *)e2, initsize) != 0){
+    if(send_8(s1_fd, (uint8_t *)e2, de_size) != 0){
         fprintf(stderr, "send e2 to s1 failed\n");
         return -1;
     }
-
     j = 0;
     for(int pair = 0; pair < no_pairs; pair++){
         for(int i = 0; i < nbytes_fixed; i++){
@@ -518,11 +527,11 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
             //server 1 computes z1 as d*b1 + e*a1 + c1
             //server 2 computes z2 as d*e + d*b2 + e*a2 + c2
             I2[pair][i] = (d[pair][i] & e[pair][i]) ^ (d[pair][i] & T2[1][j]) ^ (e[pair][i] & T2[0][j]) ^ T2[2][j];
-            free(d1);
-            free(e1);
             j++;
         }
     }
+    free(d1);
+    free(e1);
 
     
     if(uneven){
@@ -550,7 +559,7 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
             }
         }
         j = jcheckpoint;
-        int sendsize = l * nbytes_fixed;
+        int sendsize = no_pairs * nbytes_fixed;
         if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == sendsize){
             d1 = (void *)recv_arr;
             d = d1;
@@ -589,11 +598,11 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
                 //I2[index1][i] = (d[pair][i] & T2[1][j]) ^ (e[pair][i] & T2[0][j]) ^ T2[2][j];
                 //server 2 computes z2 as d*e + d*b2 + e*a2 + c2
                 I2[index1][i] = (d[pair][i] & e[pair][i]) ^ (d[pair][i] & T2[1][j]) ^ (e[pair][i] & T2[0][j]) ^ T2[2][j];
-                free(d1);
-                free(e1);
                 j++;
             }
         }
+        free(d1);
+        free(e1);
     }
 
     *Z2 = realloc(I2, nbytes_fixed);
@@ -605,6 +614,205 @@ static int intersect(int n_fixed, int l, int L, int no_multis_bytes, uint8_t (*a
     free(e2);
     return 0;
 }
+
+int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_bytes], uint8_t **Z2, bool *q, bool *t){
+    int nbytes_fixed = tobytes(n_fixed);
+    int l = L;  //l is now the length of each subvector
+    int lhalf = l - (l / 2);
+    int initsize = lhalf * m * nbytes_fixed * sizeof(uint8_t);
+    uint8_t (*I2)[lhalf][nbytes_fixed] = malloc(initsize);
+    if(!I2){
+        fprintf(stderr, "could not allocate I1\n");
+        return -1;
+    }
+
+    for(int i = 0; i < m; i++)
+        printf("q -> %d\n", q[i]);
+    printf("\n");
+    for(int i = 0; i < L * m; i++)
+        printf("t -> %d\n", t[i]);
+    printf("\n");
+
+    uint8_t (*d2)[m][nbytes_fixed] = malloc(initsize), (*e2)[m][nbytes_fixed] = malloc(initsize);
+    uint8_t (*d1)[m][nbytes_fixed] = NULL, (*e1)[m][nbytes_fixed] = NULL;
+    uint8_t (*d)[m][nbytes_fixed] = NULL, (*e)[m][nbytes_fixed] = NULL;
+    if(!d2 || !e2){
+        fprintf(stderr, "could not allocate d or e arrays\n");
+        return -1;
+    }
+
+    int index1, index2;
+    int no_pairs = l / 2;
+    bool uneven = no_pairs * 2 != l;
+    l -= no_pairs;
+
+    int index = 0, subindex = 0, j = 0;
+    for(int attribute = 0; attribute < m; attribute++){
+        for(int pair = 0; pair < no_pairs; pair++){
+            for(int i = 0; i < nbytes_fixed; i++){
+                index1 = attribute * L + (pair * 2);
+                index2 = index1 + 1;
+                d2[pair][attribute][i] = D2(index1, i) ^ (255 * t[index1]) ^ T2[0][j] ^ 255;
+                e2[pair][attribute][i] = D2(index2, i) ^ (255 * t[index2]) ^ T2[1][j++] ^ 255;
+            }
+        }
+    }
+
+    uint8_t *recv_arr;
+    uint64_t count;
+
+    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == initsize){
+        d1 = (void *)recv_arr;
+        d = d1;
+    }
+    else{
+        fprintf(stderr, "receive d1 from s1 failed\n");
+        return -1;
+    }
+    if(send_8(s1_fd, (uint8_t *)d2, initsize) != 0){
+        fprintf(stderr, "send d2 to s1 failed\n");
+        return -1;
+    }
+
+    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == initsize){
+        e1 = (void *)recv_arr;
+        e = e1;
+    }
+    else{
+        fprintf(stderr, "receive e1 from s1 failed\n");
+        return -1;
+    }
+
+    if(send_8(s1_fd, (uint8_t *)e2, initsize) != 0){
+        fprintf(stderr, "send e2 to s1 failed\n");
+        return -1;
+    }
+
+    j = 0;
+    for(int attribute = 0; attribute < m; attribute++){
+        for(int pair = 0; pair < no_pairs; pair++){
+            for(int i = 0; i < nbytes_fixed; i++){
+                d[pair][attribute][i] = d1[pair][attribute][i] ^ d2[pair][attribute][i];
+                e[pair][attribute][i] = e1[pair][attribute][i] ^ e2[pair][attribute][i];
+                I2[pair][attribute][i] = (d[pair][attribute][i] & e[pair][attribute][i]) ^ (d[pair][attribute][i] & T2[1][j])
+                    ^ (e[pair][attribute][i] & T2[0][j]) ^ T2[2][j];
+                j++;
+            }
+        }
+    }
+    free(d1);
+    free(e1);
+
+    int leftoverindex;
+    if(uneven){
+        for(int attribute = 0; attribute < m; attribute++){
+            for(int i = 0; i < nbytes_fixed; i++){
+                leftoverindex = L * (attribute + 1) - 1;
+                I2[no_pairs][attribute][i] = D2(leftoverindex, i) ^ (255 * t[leftoverindex]) ^ 255;
+            }
+        }
+    }
+
+    int jcheckpoint, spacing;
+    int no_rounds = (int)ceil(log2(l));
+    for(int round = 0; round < no_rounds; round++){
+        l -= no_pairs;
+        spacing = (int)pow(2, round);
+        jcheckpoint = j;
+        for(int attribute = 0; attribute < m; attribute++){
+            for(int pair = 0; pair < no_pairs; pair++){
+                index1 = 2*pair*spacing;
+                index2 = spacing*(2*pair + 1);
+                for(int i = 0; i < nbytes_fixed; i++){
+                    d2[pair][attribute][i] = I2[index1][attribute][i] ^ T2[0][j];
+                    e2[pair][attribute][i] = I2[index2][attribute][i] ^ T2[1][j++];
+                }
+            }
+        }
+        j = jcheckpoint;
+        int sendsize = l * m * nbytes_fixed;
+        if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == sendsize){
+            d1 = (void *)recv_arr;
+            d = d1;
+        }
+        else{
+            fprintf(stderr, "receive d1 from s1 failed\n");
+            return -1;
+        }
+        if(send_8(s1_fd, (uint8_t *)d2, sendsize) != 0){
+            fprintf(stderr, "send d2 to s1 failed\n");
+            return -1;
+        }
+
+        if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == sendsize){
+            e1 = (void *)recv_arr;
+            e = e1;
+        }
+        else{
+            fprintf(stderr, "receive e1 from s1 failed\n");
+            return -1;
+        }
+
+        if(send_8(s1_fd, (uint8_t *)e2, sendsize) != 0){
+            fprintf(stderr, "send e2 to s1 failed\n");
+            return -1;
+        }
+
+        //servers publish shares, i.e. server 1 sends D1 and E1, server 2 similarly
+        for(int attribute = 0; attribute < m; attribute++){
+            for(int pair = 0; pair < no_pairs; pair++){
+                index1 = 2*pair*spacing;
+                for(int i = 0; i < nbytes_fixed; i++){
+                    //now both servers have all parts to reconstruct D and E, and thus both calculate:
+                    d[pair][attribute][i] = d1[pair][attribute][i] ^ d2[pair][attribute][i];
+                    e[pair][attribute][i] = e1[pair][attribute][i] ^ e2[pair][attribute][i];
+                    I2[index1][attribute][i] = (d[pair][attribute][i] & e[pair][attribute][i]) ^
+                        (d[pair][attribute][i] & T2[1][j]) ^ (e[pair][attribute][i] & T2[0][j]) ^ T2[2][j];
+                    j++;
+                }
+            }
+        }
+        free(d1);
+        free(e1);
+    }
+
+    free(d2);
+    free(e2);
+
+    //z is intermediate results, Z is final
+    //uint8_t (*z2)[nbytes_fixed] = realloc(I2, m * nbytes_fixed * sizeof(uint8_t));
+    uint8_t (*z2)[nbytes_fixed] = malloc(m * nbytes_fixed * sizeof(uint8_t));
+    for(int attribute = 0; attribute < m; attribute++)
+        memcpy(z2[attribute], I2[0][attribute], nbytes_fixed);
+    free(I2);
+
+    for(int attribute = 0; attribute < m; attribute++)
+        for(int i = 0; i < nbytes_fixed; i++)
+            z2[attribute][i] ^= (255 * q[attribute]) ^ 255;
+
+    for(int i = 0; i < m; i++)
+        printf("z -> %d\n", z2[i][0] >> 0 & 1);
+    printf("\n");
+
+    int intersect_indices[1];
+    intersect_indices[0] = 0;
+    for(int attribute = 0; attribute < m; attribute++)
+        t[attribute] = 1;
+
+    no_multis_bytes = (m - 1) * nbytes_fixed;
+    uint8_t (*T2_2)[no_multis_bytes] = malloc(3 * no_multis_bytes * sizeof(uint8_t));
+    for(int k = 0; k < 3; k++)  //tedious necessary rearrangement of triples
+        memcpy(T2_2[k], &T2[k][j], no_multis_bytes);
+
+    int ret = intersectminus(n_fixed, m, m, no_multis_bytes, z2, T2_2, Z2, intersect_indices, t);
+    printf("printing Z:\n");
+    printboolvec(*Z2, n_fixed);
+    free(z2);
+    free(T2_2);
+    return ret;
+
+}
+
 
 static void cout_size_reduction(int batch_bytes, int max_depth, uint8_t (*S)[batch_bytes * 8], uint8_t **choices, int *js, int *js_acc){
     //int batch_size = batch_bytes * 8;
@@ -622,7 +830,7 @@ static void cout_size_reduction(int batch_bytes, int max_depth, uint8_t (*S)[bat
 
 }
 
-static void cout_product_sharing(int batch_bytes, uint8_t (*s)[batch_bytes * 8], uint8_t **choices, int noOTs_bytes){
+static void cout_product_sharing(int batch_bytes, uint8_t (*s)[batch_bytes], uint8_t **choices, int noOTs_bytes){
     
     //server2
     //int c = 0;
@@ -733,7 +941,7 @@ static int couteauSR(int n_fixed, int max_depth, uint8_t (**YS)[tobytes(n_fixed)
                 ys[j * L + k][i] = D2(intersect_indices[j] * L + k, i) ^ (255 * t[j * L + k]);
 
     if(l == 1 || max_depth == 0){
-        *YS = realloc(ys, nbytes_fixed);
+        *YS = realloc(ys, rsize * nbytes_fixed);
         printf("skipping size reduction\n");
         return 0;
     }
@@ -885,7 +1093,7 @@ static int couteauHybridET(int n_fixed, int max_depth, uint8_t **Z2, uint8_t (*S
     for(int i = 0; i < rsize; i++)
         t[i] = 0;
 
-    int ret = intersect(n_fixed, rsize, rsize, no_multis_bytes, YS, T2, Z2, intersect_indices, t);
+    int ret = intersectminus(n_fixed, rsize, rsize, no_multis_bytes, YS, T2, Z2, intersect_indices, t);
     free(YS);
     return ret;
 }
@@ -909,9 +1117,19 @@ static int couteauET(int n_fixed, int max_depth, uint8_t **Z2, uint8_t (*S)[toby
 }
 
 static void generate_records(){
-    randombytes_buf(D, nbytes * line);
+    //randombytes_buf(D, nbytes * line);
+    memset(D, 0, nbytes * line);
+    uint32_t r_vec[m][n];
+    random_vector((uint32_t*)r_vec, m * n, (1 << L) - 1);
+    for(int attribute = 0; attribute < m; attribute++){
+        for(int i = 0; i < n; i++){
+            bool temp[L];
+            int_to_vector((int)r_vec[attribute][i], temp, L);
+            for(int k = 0; k < L; k++)
+                D2(attribute * L + k, i/8) |= temp[k] << i%8;
+        }
+    }
 }
-
 //dabitgen algorithm according to [1] but parallelised
 static int generate_dabits(int batch_bytes, uint8_t *B2, uint32_t *A2){
     int batch_size = batch_bytes * 8;
@@ -937,7 +1155,8 @@ static int generate_dabits(int batch_bytes, uint8_t *B2, uint32_t *A2){
         }
         A2[i] = FF_convert((B2[byte] >> bit++ & 1) - (2 * A2[i]), FF_size);
     }
-    printf("finished generating dabits\n");
+    if(verbose)
+        printf("finished generating dabits\n");
     return 0;
 }
 
@@ -985,7 +1204,8 @@ static int generate_beaver_triples(int batch_bytes, uint8_t (*T2)[batch_bytes]){
     free(messages2);
     free(output);
 
-    printf("finished generating beaver triples\n");
+    if(verbose)
+        printf("finished generating beaver triples\n");
     return 0;
 }
 
@@ -1035,9 +1255,70 @@ static int b2a_convert(int n_fixed, uint32_t *output2, uint8_t *input2, uint8_t 
     return 0;
 }
 
-static int client_update(connection_t *c, uint8_t *arr, uint64_t count){
+static int verify(uint8_t *arr){
+    int no_multis = (L - 1) * m;
+    uint8_t T2[3][no_multis];
+    if(generate_beaver_triples(no_multis, T2) == -1){
+        fprintf(stderr, "error in generate_beaver_triples()\n");
+        return -1;
+    }
+    univ_start = clock();
+
+    printboolvec(arr, 8);
+    uint8_t Z2[m], *Z1;
+    bool R[line];
+    bytestobools(R, arr, line);
+    bool t[L];
+    for(int j = 0; j < L; j++)
+        t[j] = 1;
+
+    for(int i = 0; i < m; i++){
+        //fprintf(stderr, "i = %d\n", i);
+        int index [1];
+        index[0] = 0;
+        uint8_t *z = NULL;
+        uint8_t alt_D[L][1];
+        for(int j = 0; j < L; j++){
+            alt_D[j][0] = R[i * L + j];
+            //printf("%d\n", alt_D[j][0]);
+        }
+        if(intersectminus(1, L, L, no_multis, alt_D, &T2[no_multis], &z, index, t) == -1){
+            fprintf(stderr, "error in intersectminus()\n");
+            return -1;
+        }
+        Z2[i] = z[0] & 1;
+        printf("%d\n", Z2[i]);
+        free(z);
+    }
+
+    uint8_t *recv_arr;
+    uint64_t count, exp_count = m;
+
+    if(send_8(s1_fd, Z2, exp_count) != 0)
+        return -1;
+
+    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == exp_count)
+        Z1 = recv_arr;
+    else{
+        fprintf(stderr, "receive Z1 from s1 failed, no. elements received = %" PRIu64 "\n", count);
+        return -1;
+    }
+
+    for(int i = 0; i < m; i++)
+        //printf("%d\n", Z1[i] ^ Z2[i]);
+        if(Z1[i] ^ Z2[i])
+            return 0;
+    printf("---------------------------------\n");
+    univ_end = clock();
+    univ_final = (double)(univ_end - univ_start) / CLOCKS_PER_SEC;
+    printf("total time = %f\n", univ_final);
+    return 1;
+}
+
+static int client_update(uint8_t *arr, uint64_t count){
     int linebytes = tobytes(line);
-    if(count == linebytes + 1){
+    if(count == linebytes){
+        if(!verify(arr)){ fprintf(stderr, "cheating client, the vector of all 1s is not allowed\n"); return -1;};
         int nbyte, nbit;
         int byte = 0, bit = 0;
         indextobyteandbit(&nbyte, &nbit, n++);
@@ -1076,29 +1357,34 @@ static void* client_query_thread(void *arg){
     int client_fd = args->client_fd;
     uint8_t *arr = args->arr;
     uint64_t count = args->count;
-
     int intersection_indices[m];
 
-    if(m > 64){
+    int max_q_len_bytes = 16;
+    int max_q_len = max_q_len_bytes * 8;
+
+    if(m > max_q_len){
         fprintf(stderr, "need bigger buffer for m\n");
         return NULL;
     }
-    int index_len = bchartoindexvec(intersection_indices, &arr[1], 64);
-    int query_len = index_len * L;
 
-    if(count != 1 + 8 + tobytes(query_len)){
-        fprintf(stderr, "message len should be 1 (message type) + 8 (q) + %d (query_len_bytes)\n", tobytes(query_len));
+    int index_len, query_len;
+    if(intersect_version == INTERSECT_MINUS || cout)
+        index_len = bchartoindexvec(intersection_indices, arr, max_q_len);
+    else index_len = m;
+    query_len = index_len * L;
+
+    if(count != 1 + max_q_len_bytes + tobytes(query_len)){
+        fprintf(stderr, "message len should be 1 (message type) + 16 (q) + %d (t), actual len = %ld\n", tobytes(query_len), count);
         return NULL;
     }
     bool t[query_len];
-    int byte = 0, bit = 0;
-    for(int i = 0; i < query_len; i++){
-        if(bit > 7){
-            bit = 0;
-            byte++;
-        }
-        t[i] = arr[1 + 8 + byte] >> bit++ & 1;
-    }
+    bytestobools(t, &arr[max_q_len_bytes], query_len);
+
+    /*fprintf(stderr, "index_len = %d, query_len = %d\n", index_len, query_len);
+    for(int i = 0; i < query_len; i++)
+        printf("%d\n", t[i]);
+    for(int i = 0; i < index_len; i++)
+        printf("%d\n", intersection_indices[i]);*/
 
     uint8_t *dab2B = malloc(nbytes_fixed * sizeof(uint8_t));
     uint32_t *dab2A = malloc(8 * nbytes_fixed * sizeof(uint32_t));
@@ -1112,8 +1398,6 @@ static void* client_query_thread(void *arg){
         return NULL;
     }
     uint8_t *Z2 = NULL;
-
-
     if(cout){
         int j = query_len, depth = 0;
         int noOTs_j = 0;
@@ -1136,14 +1420,14 @@ static void* client_query_thread(void *arg){
         expon = (int)pow(2, rsize) - 2;
         if(light){
             if(!benchmarking){
-                uint8_t (*S)[nbytes_fixed] = malloc(nbytes_fixed * noOTs_j);
-                uint32_t (*B)[nbytes_fixed * 8] = malloc(4 * nbytes_fixed * 8 * noOTs_j);
+                uint8_t (*S)[nbytes_fixed] = malloc(noOTs_j * nbytes_fixed * sizeof(uint8_t));
+                uint32_t (*B)[nbytes_fixed * 8] = malloc(noOTs_j * (nbytes_fixed * 8) * sizeof(uint32_t));
                 if(!S || !B){
                     fprintf(stderr, "could not allocate S or B\n");
                     return NULL;
                 }
                 int no_multis_bytes = nbytes_fixed * (rsize - 1);
-                uint8_t (*T2)[no_multis_bytes] = malloc(no_multis_bytes * 3);
+                uint8_t (*T2)[no_multis_bytes] = malloc(3 * no_multis_bytes * sizeof(uint8_t));
                 if(!T2){
                     fprintf(stderr, "could not allocate T2\n");
                     return NULL;
@@ -1172,13 +1456,14 @@ static void* client_query_thread(void *arg){
         }
         else{   //coutfull
             if(!benchmarking){
-                uint8_t (*S)[nbytes_fixed] = malloc(nbytes_fixed * noOTs_j);
-                uint32_t (*B)[nbytes_fixed * 8] = malloc(4 * nbytes_fixed * 8 * noOTs_j);
+                uint8_t (*S)[nbytes_fixed] = malloc(noOTs_j * nbytes_fixed * sizeof(uint8_t));
+                uint32_t (*B)[nbytes_fixed * 8] = malloc(noOTs_j * (nbytes_fixed * 8) * sizeof(uint32_t));
                 if(!S || !B){
                     fprintf(stderr, "could not allocate S or B\n");
                     return NULL;
                 }
-                uint8_t (*s)[nbytes_fixed] = malloc(nbytes_fixed * expon), (*b)[nbytes_fixed] = malloc(nbytes_fixed * expon);
+                uint8_t (*s)[nbytes_fixed] = malloc(expon * nbytes_fixed * sizeof(uint8_t)),
+                (*b)[nbytes_fixed] = malloc(expon * nbytes_fixed * sizeof(uint8_t));
                 if(!s || !b){
                     fprintf(stderr, "could not allocate s or b\n");
                     return NULL;
@@ -1213,7 +1498,7 @@ static void* client_query_thread(void *arg){
     else{   //intersect
         if(!benchmarking){
             int no_multis_bytes = tobytes(n_fixed) * (query_len - 1);
-            uint8_t (*T2)[no_multis_bytes] = malloc(no_multis_bytes * 3);
+            uint8_t (*T2)[no_multis_bytes] = malloc(3 * no_multis_bytes * sizeof(uint8_t));
             if(!T2){
                 fprintf(stderr, "error allocating T1\n");
                 return NULL;
@@ -1225,10 +1510,21 @@ static void* client_query_thread(void *arg){
                 return NULL;
             }
             end_time = clock();
-            if(intersect(n_fixed, query_len, L, no_multis_bytes, NULL, T2, &Z2, intersection_indices, t) == -1){
-                fprintf(stderr, "error in intersect()\n");
-                return NULL;
+            if(intersect_version == INTERSECT_MINUS){
+                if(intersectminus(n_fixed, query_len, L, no_multis_bytes, NULL, T2, &Z2, intersection_indices, t) == -1){
+                    fprintf(stderr, "error in intersectminus()\n");
+                    return NULL;
+                }
             }
+            else{
+                bool q[m];
+                bytestobools(q, arr, m);
+                if(intersectfull(n_fixed, no_multis_bytes, T2, &Z2, q, t) == -1){
+                    fprintf(stderr, "error in intersectfull()\n");
+                    return NULL;
+                }
+            }
+
             final_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
             //final_time += artificial_delay;
             //printf("%.2f\n", final_time);
@@ -1240,7 +1536,6 @@ static void* client_query_thread(void *arg){
             else return intersect_online_tests(query_len, V1, V2, Z1, Z2);*/
         }
     }
-
     //printboolvec(Z2, n_fixed);
 
     uint32_t *Z2_arith = malloc(n_fixed * sizeof(uint32_t));//arithmetic shares of the intersection values, Z1 and Z2
@@ -1259,19 +1554,19 @@ static void* client_query_thread(void *arg){
     printf("s2_total = %d\n", s2_total);
     free(Z2_arith);
 
-    uint8_t *response = malloc(1 * sizeof(uint8_t));
+    int response_len = 1 * sizeof(uint8_t);
+    uint8_t *response = malloc(response_len);
     response[0] = gc_threshold_check(2, s2_total, FF_size, THRESHOLD, target_addr, GCPORT);
     //response[0] = 0;
     //printf("%d\n", response[0]);
-    printf("FF_size = %d\n", FF_size);
 
-    free(args->arr);
+    free(args->arr - 1);
     free(args);
 
     query_thread_result *result = malloc(sizeof(query_thread_result));
     result->client_fd = client_fd;
     result->response = response;
-    result->response_len = 1;
+    result->response_len = response_len;
     // Post result to event loop
     pthread_mutex_lock(&result_queue_mutex);
     enqueue_result(&result_queue, result);
@@ -1279,10 +1574,10 @@ static void* client_query_thread(void *arg){
 
     uint64_t val = 1;
     eventfd_write(exchange_eventfd, val);
-    printf("n = %d\n", n_fixed);
 
     return NULL;
 }
+
 
 static void client_query(connection_t *c, uint8_t *arr, uint64_t count){
 
@@ -1429,9 +1724,15 @@ static void handle_message(connection_t *c, uint8_t *arr, uint64_t count){
         return;
     }
     uint8_t mtype = arr[0];
-    if(mtype == 0) client_update(c, arr, count);
-    else if(mtype == 1) client_query(c, arr, count);
-    else fprintf(stderr, "message type must be 0 (update) or 1 (query)\n");
+    if(mtype == 0){
+        client_update(&arr[1], count - 1);
+        free(arr);
+    }
+    else if(mtype == 1) client_query(c, &arr[1], count);
+    else{
+        fprintf(stderr, "message type must be 0 (update) or 1 (query)\n");
+        free(arr);
+    }
 }
 
 static void handle_read(connection_t *c){
@@ -1450,7 +1751,6 @@ static void handle_read(connection_t *c){
             if(rc == 0){
                 // Complete message — equivalent to recv_uint8_array() success
                 handle_message(c, arr, count);
-                //free(arr);
             }
             continue;
         }
