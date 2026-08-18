@@ -151,19 +151,20 @@ uint32_t aggregate_1D(uint32_t* array, int FF_size, int len){
 }
 
 void secret_share(bool* v, bool* v1, bool* v2, int query_len){
-    char buffer[32];
-    uint32_t r;
-    int k = 0;
+    int len_bytes = tobytes(query_len);
+    char buffer[len_bytes];
+    randombytes_buf(buffer, len_bytes);
 
     for(int i = 0; i < query_len; i++){
-        k %= 32;
-        if(k == 0){
-            randombytes_buf(buffer, 32);
-            r = randombytes_uniform((int)pow(2, 32));
-        }
-        v1[i] = (r  >> k++) & 1;
+        v1[i] = (buffer[i/8]  >> i%8) & 1;
         v2[i] = v1[i] ^ v[i];
     }
+}
+
+void secret_share_bytes(uint8_t* v, uint8_t* v1, uint8_t* v2, int len_bytes){
+    randombytes_buf(v1, len_bytes);
+    for(int i = 0; i < len_bytes; i++)
+        v2[i] = v1[i] ^ v[i];
 }
 
 //converts an integer index to a suitable (byte, bit) pair index, e.g. 9 -> (1, 1)
@@ -210,7 +211,7 @@ int bchartoindexvec(int *out_indexvec, uint8_t *bchars, int len){
             byte++;
         }
         if(bchars[byte] >> bit++ & 1){
-            out_indexvec[j] = j;
+            out_indexvec[j] = i;
             j++;
         }
     }
@@ -273,6 +274,15 @@ void encode_uint64_be(uint8_t out[8], uint64_t val){
     out[6] = (uint8_t)(val >>  8);
     out[7] = (uint8_t)(val      );
 }
+
+/* Encode a uint32_t in network byte order (big-endian) into 8 bytes. */
+void encode_uint32_be(uint8_t out[4], uint32_t val){
+    out[0] = (uint8_t)(val >> 24);
+    out[1] = (uint8_t)(val >> 16);
+    out[2] = (uint8_t)(val >>  8);
+    out[3] = (uint8_t)(val      );
+}
+
 
 /* Decode a uint64_t from 8 big-endian bytes. */
 uint64_t decode_uint64_be(const uint8_t in[8])
@@ -398,6 +408,33 @@ int recv_uint32_array(int fd, uint32_t **out_arr, uint64_t *out_count, int max_a
 
     *out_arr = arr;
     *out_count = count;
+    return 0;
+}
+
+//only for sending share to client for gabled circuit
+int recv_uint32_array_no_count(int fd, uint32_t **out_arr, int max_arr_elements){
+    *out_arr = NULL;
+    int count = 3;
+
+    /* 2. Allocate the output buffer. */
+    uint32_t *arr = malloc(count * sizeof(uint32_t));
+    if(!arr){
+        errno = ENOMEM;
+        return -4;
+    }
+
+    /* 3. Receive the raw big-endian payload directly into the buffer. */
+    int rc = recv_all(fd, arr, count * sizeof(uint32_t));
+    if(rc != 0){
+        free(arr);
+        return rc;
+    }
+
+    /* 4. Convert from network byte order to host byte order in-place. */
+    for (uint64_t i = 0; i < count; i++)
+        arr[i] = ntohl(arr[i]);
+
+    *out_arr = arr;
     return 0;
 }
 
