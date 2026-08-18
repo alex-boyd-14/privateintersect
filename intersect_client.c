@@ -1,4 +1,5 @@
 #include "aux.h"
+#include "gc_wrap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -28,6 +29,14 @@ volatile static bool running;
 const static bool benchmarking = false;
 static int s1_fd, s2_fd;
 static int m, L, line;
+
+typedef enum {
+    INTERSECT_FULL = 0,
+    INTERSECT_MINUS,
+} intersect_version_t;
+
+static const intersect_version_t intersect_version = INTERSECT_FULL;
+static const bool cout = true;
 
 //connect to server s
 int connect_serv(bool s){
@@ -67,15 +76,6 @@ static int recv_hello(){
     L = buf[1];
     line = m * L;
     return 0;
-}
-
-static int recv_query_response(bool b){
-    int fd = b? s2_fd: s1_fd;
-    uint8_t buf[1];
-    int rc = recv_all(fd, buf, sizeof(buf));
-    printf("response = %d\n", buf[0]);
-    if (rc != 0) return rc;
-    return buf[0];
 }
 
 void client_shutdown(int s1_fd, int s2_fd){
@@ -136,10 +136,8 @@ static int receive_8(int target_fd, uint8_t **out_arr, uint64_t *out_count){
 static int receive_32(int target_fd, uint32_t **out_arr, uint64_t *out_count){
     uint32_t *arr;
     uint64_t count;
-    printf("fd = %d\n", target_fd);
     int rc = recv_uint32_array(target_fd, &arr, &count, MAX_ARRAY_ELEMENTS);
     fprintf(stderr, "recv array returned: %d\n", rc);
-    printf("hellorecv32\n");
     if(rc == 0){
         printf("received %" PRIu64 " elements\n", count);
     }
@@ -159,6 +157,53 @@ static int receive_32(int target_fd, uint32_t **out_arr, uint64_t *out_count){
     *out_count = count;
     return 0;
 }
+
+static int receive_32_no_count(int target_fd, uint32_t **out_arr){
+    uint32_t *arr;
+    int rc = recv_uint32_array_no_count(target_fd, &arr, MAX_ARRAY_ELEMENTS);
+    if(rc == 0){
+        //printf("rc = 0\n");
+    }
+    else if (rc == -1){
+        fprintf(stderr, "recv failed: syscall error: %s\n", strerror(errno));
+        return -1;
+    }
+    else if (rc == -2){
+        fprintf(stderr, "recv failed: server closed connection unexpectedly\n");
+        return -1;
+    }
+    else{
+        fprintf(stderr, "recv failed: rc=%d\n", rc);
+        return -1;
+    }
+    *out_arr = arr;
+    return 0;
+}
+
+
+
+static int recv_query_response1(){
+    uint32_t *recv_arr;
+    int rc = receive_32_no_count(s1_fd, &recv_arr);
+    if (rc != 0) return rc;
+    uint32_t s1_total = recv_arr[0], FF_size = recv_arr[1], THRESHOLD = recv_arr[2];
+    int GCPORT = 1212;
+    int res = gc_threshold_check(1, s1_total, FF_size, THRESHOLD, NULL, GCPORT);
+    printf("response = %d\n", res);
+    return res;
+}
+
+static int recv_query_response2(){
+    uint8_t buf[1];
+    int rc = recv_all(s2_fd, buf, sizeof(buf));
+    printf("response = %d\n", buf[0]);
+    if (rc != 0) {
+        fprintf(stderr, "error in recv_query_response2(), rc = %d\n", rc);
+        return rc;
+    }
+    return buf[0];
+}
+
 
 int post_data(int s1_fd, int s2_fd){
 	char readBuf[256];
@@ -180,13 +225,12 @@ int post_data(int s1_fd, int s2_fd){
         if(line > 256){
             printf("readBuf[] not large enough\n");
             return -1;
-
         }
         for(int i = 0; i < line; i++){
             num = readBuf[i] - '0';
-   			if(num != 0 && num != 1){
+            if(num != 0 && num != 1){
                 fprintf(stderr, "error: please enter a bitstring of your data\n");
-                printf("num = %d\n", num);
+                printf("num = %d, i = %d\n", num, i);
                 return -1;
             }
             d[i] = num;
@@ -274,7 +318,6 @@ int query_data(){
 				intersection_indices[i] = num - 1;
    				index_len = i + 1;
                 query_len = index_len * L;
-                query_len_bytes = tobytes(query_len);
 				break;
 			}
             else{
@@ -288,7 +331,8 @@ int query_data(){
 		return 1;
 	}
 
-    bool query[query_len], q1[query_len], q2[query_len];
+    query_len_bytes = tobytes(query_len);
+    bool query[query_len], t1[query_len], t2[query_len];
     if(benchmarking)
         for(int i = 0; i < query_len; i++)
             query[i] = 0;
@@ -322,27 +366,58 @@ int query_data(){
             }
         }
     }
+    int max_q_len_bytes = 16;
+    int max_q_len = max_q_len_bytes * 8;
 
-    secret_share(query, q1, q2, query_len);
-    int msg_len = 1 + 8 + query_len_bytes;
+    bool *t, temp[query_len];
+	if(intersect_version == INTERSECT_MINUS || cout)
+        t = query;
+    else{   //set the parts of the vector not included in query to 1s
+        query_len = line;
+        memset(temp, 1, query_len);
+        int j = 0;
+        for(int i = 0; i < index_len; i++)
+            for(int k = 0; k < L; k++)
+                temp[intersection_indices[i] * L + k] = query[j++];
+        t = temp;
+    }
+
+    //for(int i = 0; i < query_len; i++)
+      //  printf("t -> %d\n", t[i]);
+
+    secret_share(t, t1, t2, query_len);
+    int msg_len = 1 + max_q_len_bytes + query_len_bytes;
 
     uint8_t s1_send_buf[msg_len];
     uint8_t s2_send_buf[msg_len];
     s1_send_buf[0] = 1;
     s2_send_buf[0] = 1;
-    indexvectobchar(&s1_send_buf[1], intersection_indices, 64, index_len);
-    indexvectobchar(&s2_send_buf[1], intersection_indices, 64, index_len);
-    boolstobytes(&s1_send_buf[1 + 8], q1, query_len);
-    boolstobytes(&s2_send_buf[1 + 8], q2, query_len);
 
+    //printf("intersect_index[0] = %d\n", intersection_indices[0]);
+    if(intersect_version == INTERSECT_MINUS || cout){
+        indexvectobchar(&s1_send_buf[1], intersection_indices, max_q_len, index_len);
+        indexvectobchar(&s2_send_buf[1], intersection_indices, max_q_len, index_len);
+    }
+    else{
+        uint8_t q[max_q_len_bytes];
+        memset(q, 0, max_q_len_bytes);
+        indexvectobchar(q, intersection_indices, max_q_len, index_len);
+        secret_share_bytes(q, &s1_send_buf[1], &s2_send_buf[1], max_q_len_bytes);
+    }
 
-    if (send_8(s1_fd, s1_send_buf, msg_len) != 0)
+    //printboolvec(&s1_send_buf[1], 4);
+
+    boolstobytes(&s1_send_buf[1 + max_q_len_bytes], t1, query_len);
+    boolstobytes(&s2_send_buf[1 + max_q_len_bytes], t2, query_len);
+
+    if(send_8(s1_fd, s1_send_buf, msg_len) != 0)
         perror("send to s1 failed");
-    if (send_8(s2_fd, s2_send_buf, msg_len) != 0)
+    if(send_8(s2_fd, s2_send_buf, msg_len) != 0)
         perror("send to s2 failed");
     printf("query sent to servers\n");
-    uint8_t s1_result = recv_query_response(0);
-    uint8_t s2_result = recv_query_response(1);
+
+    int s1_result = recv_query_response1();
+    int s2_result = recv_query_response2();
     if(s1_result < 0){
         fprintf(stderr, "error: rc = %d\n", s1_result);
         return -1;
