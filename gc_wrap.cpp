@@ -25,25 +25,25 @@ extern "C" uint8_t gc_threshold_check(int party, uint32_t share, uint32_t p,
     auto wrapped  = raw_sum >= p_const;
     auto sum      = raw_sum.select(wrapped, reduced);
     // Threshold comparison
-    auto result   = sum > T_const;
+    auto result   = sum < T_const;
 
     // ALICE picks her share
-    uint8_t r = (party == ALICE) ? (rand() & 1) : 0;
+    uint8_t r = (party == BOB) ? (rand() & 1) : 0;
 
     // Input r into the circuit as ALICE's private value
     using Bit = Bit_T<Ctx>;
-    auto r_bit   = sess.input<Bit>(ALICE, r);
+    auto r_bit = sess.input<Bit>(BOB, r);
 
     // XOR the result with r inside the circuit
-    auto masked  = result ^ r_bit;
+    auto masked = result ^ r_bit;
 
     // Reveal only the masked result to BOB
     uint8_t result_share;
     if (party == ALICE) {
-        sess.reveal(masked, BOB);  // BOB learns result XOR r
-        result_share = r;          // ALICE keeps r
+        result_share = sess.reveal(masked, ALICE).value();    // ALICE keeps r
     } else {
-        result_share = (uint8_t)sess.reveal(masked, BOB).value();
+        sess.reveal(masked, ALICE);
+        result_share = r;
     }
 
     return result_share;

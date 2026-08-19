@@ -1,5 +1,4 @@
 #include "aux.h"
-#include "gc_wrap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -36,7 +35,7 @@ typedef enum {
 } intersect_version_t;
 
 static const intersect_version_t intersect_version = INTERSECT_FULL;
-static const bool cout = true;
+static const bool cout = false;
 
 //connect to server s
 int connect_serv(bool s){
@@ -180,17 +179,15 @@ static int receive_32_no_count(int target_fd, uint32_t **out_arr){
     return 0;
 }
 
-
-
 static int recv_query_response1(){
-    uint32_t *recv_arr;
-    int rc = receive_32_no_count(s1_fd, &recv_arr);
-    if (rc != 0) return rc;
-    uint32_t s1_total = recv_arr[0], FF_size = recv_arr[1], THRESHOLD = recv_arr[2];
-    int GCPORT = 1212;
-    int res = gc_threshold_check(1, s1_total, FF_size, THRESHOLD, NULL, GCPORT);
-    printf("response = %d\n", res);
-    return res;
+    uint8_t buf[1];
+    int rc = recv_all(s1_fd, buf, sizeof(buf));
+    printf("response = %d\n", buf[0]);
+    if (rc != 0) {
+        fprintf(stderr, "error in recv_query_response1(), rc = %d\n", rc);
+        return rc;
+    }
+    return buf[0];
 }
 
 static int recv_query_response2(){
@@ -203,7 +200,6 @@ static int recv_query_response2(){
     }
     return buf[0];
 }
-
 
 int post_data(int s1_fd, int s2_fd){
 	char readBuf[256];

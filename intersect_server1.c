@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "libote_wrap.h"
+#include "gc_wrap.h"
 #include "aux.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1617,13 +1618,9 @@ static void* client_query_thread(void *arg){
     printf("s1_total = %d\n", s1_total);
     free(Z1_arith);
 
-    int response_len = 3 * sizeof(uint32_t);
+    int response_len = 1 * sizeof(uint8_t);
     uint8_t *response = malloc(response_len);
-    //response[0] = gc_threshold_check(1, s1_total, FF_size, THRESHOLD, NULL, GCPORT);
-    encode_uint32_be(&response[0], s1_total);
-    encode_uint32_be(&response[4], FF_size);
-    encode_uint32_be(&response[8], THRESHOLD);
-
+    response[0] = gc_threshold_check(1, s1_total, FF_size, THRESHOLD, NULL, GCPORT);
     //printf("%d\n", response[0]);
 
     free(args->arr - 1);
