@@ -1,4 +1,4 @@
-set(CMAKE_PREFIX_PATH "/home/alex/libOTe")
+set(CMAKE_PREFIX_PATH "/home/user/libOTe") #replace user with your username
 
 cmake_minimum_required(VERSION 3.15)
 project(ote_c_integration LANGUAGES C CXX)
