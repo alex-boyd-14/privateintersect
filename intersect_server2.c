@@ -28,7 +28,7 @@
 #define SPORT 8080
 #define CPORT 8082
 #define GCPORT 1212
-const static char* target_addr = "127.0.0.1";
+const static char* target_addr = "10.0.4.210";
 
  
  /*send and receive code */
@@ -1554,8 +1554,8 @@ static void* client_query_thread(void *arg){
 
     int response_len = 1 * sizeof(uint8_t);
     uint8_t *response = malloc(response_len);
-    response[0] = gc_threshold_check(2, s2_total, FF_size, THRESHOLD, target_addr, GCPORT);
-    //response[0] = 0;
+    //response[0] = gc_threshold_check(2, s2_total, FF_size, THRESHOLD, target_addr, GCPORT);
+    response[0] = 0;
     //printf("%d\n", response[0]);
 
     free(args->arr - 1);

@@ -78,6 +78,15 @@ typedef enum {
 } intersect_version_t;
 
 typedef enum {
+    INTERSECT_ONLINE = 0,
+    INTERSECT_OFFLINE,
+    COUTFULL_ONLINE,
+    COUTFULL_OFFLINE,
+    COUTHYBRID_ONLINE,
+    COUTHYBRID_OFFLINE,
+} benchmark_type_t;
+
+typedef enum {
     CONN_FREE = 0,
     CONN_ACTIVE,
     CONN_CLOSING,
@@ -141,9 +150,65 @@ typedef struct {
     result_node_t  *tail;
 } result_queue_t;
 
-double time_calc(double start_time, double end_time){
+static double time_calc(double start_time, double end_time){
     return (double)(end_time - start_time) / CLOCKS_PER_SEC;
 }
+
+static void bench_start(){
+    if(benchmarking)
+        univ_start = clock();
+}
+
+static void bench_end(benchmark_type_t benchmark_type){
+    if(!benchmarking) return;
+    univ_end = clock();
+    univ_final = time_calc(univ_start, univ_end);
+    switch(benchmark_type){
+        case INTERSECT_ONLINE:
+            if(intersect_online_record){
+                intersect_online_results = fopen("intersect_online.txt", "a");
+                fprintf(intersect_online_results, "%.2f, ", univ_final);
+                fclose(intersect_online_results);
+            }
+            break;
+        case INTERSECT_OFFLINE:
+            if(intersect_offline_record){
+                intersect_offline_results = fopen("intersect_offline.txt", "a");
+                fprintf(intersect_offline_results, "%.2f, ", univ_final);
+                fclose(intersect_offline_results);
+            }
+            break;
+        case COUTFULL_ONLINE:
+            if(coutFull_online_record){
+                coutFull_online_results = fopen("coutFull_online.txt", "a");
+                fprintf(coutFull_online_results, "%.2f, ", univ_final);
+                fclose(coutFull_online_results);
+            }
+            break;
+        case COUTFULL_OFFLINE:
+            if(coutFull_offline_record){
+                coutFull_offline_results = fopen("coutFull_offline.txt", "a");
+                fprintf(coutFull_offline_results, "%.2f, ", univ_final);
+                fclose(coutFull_offline_results);
+            }
+            break;
+        case COUTHYBRID_ONLINE:
+            if(coutHybrid_online_record){
+                coutHybrid_online_results = fopen("coutHybrid_online.txt", "a");
+                fprintf(coutHybrid_online_results, "%.2f, ", univ_final);
+                fclose(coutHybrid_online_results);
+            }
+            break;
+        case COUTHYBRID_OFFLINE:
+            if(coutHybrid_offline_record){
+                coutHybrid_offline_results = fopen("coutHybrid_offline.txt", "a");
+                fprintf(coutHybrid_offline_results, "%.2f, ", univ_final);
+                fclose(coutHybrid_offline_results);
+            }
+            break;
+    }
+}
+
 
 static result_queue_t result_queue = {NULL, NULL};
 static pthread_mutex_t result_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -1445,6 +1510,7 @@ static void* client_query_thread(void *arg){
     else index_len = m;
     query_len = index_len * L;
 
+
     if(count != 1 + max_q_len_bytes + tobytes(query_len)){
         fprintf(stderr, "message len should be 1 (message type) + 16 (q) + %d (t), actual len = %ld\n", tobytes(query_len), count);
         return NULL;
@@ -1504,6 +1570,8 @@ static void* client_query_thread(void *arg){
                 fprintf(stderr, "could not allocate T1\n");
                 return NULL;
             }
+
+            bench_start();
             if(generate_beaver_triples(no_multis_bytes, T1) == -1){
                 fprintf(stderr, "error in generate_beaver_triples()\n");
                 return NULL;
@@ -1512,10 +1580,14 @@ static void* client_query_thread(void *arg){
                 fprintf(stderr, "error in couteauPrep()\n");
                 return NULL;
             }
+            bench_end(COUTHYBRID_OFFLINE);
+
+            bench_start();
             if(couteauHybridET(n_fixed, depth, &Z1, R, A, no_multis_bytes, T1, intersection_indices, t, js, js_acc) == -1){
                 fprintf(stderr, "error in couteauHybridET()\n");
                 return NULL;
             }
+            bench_end(COUTHYBRID_ONLINE);
             free(R);
             free(A);
             free(T1);
@@ -1533,21 +1605,21 @@ static void* client_query_thread(void *arg){
                 fprintf(stderr, "could not allocate r or a\n");
                 return NULL;
             }
-            double start_time = 0, end_time = 0, final_time;
-            start_time = clock();
+
+            bench_start();
             if(couteauPrep(nbytes_fixed, depth, R, A, r, a, js, js_acc) == -1){
                 fprintf(stderr, "error in couteauPrep()\n");
                 return NULL;
             }
-            end_time = clock();
+            bench_end(COUTFULL_OFFLINE);
 
+            bench_start();
             if(couteauET(n_fixed, depth, &Z1, R, A, r, a, intersection_indices, t, js, js_acc) == -1){
                 fprintf(stderr, "error in couteauET()\n");
                 return NULL;
             }
-            final_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
-            //final_time += artificial_delay;
-            printf("%.2f\n", final_time);
+            bench_end(COUTFULL_ONLINE);
+
             free(r);
             free(a);
             free(R);
@@ -1561,22 +1633,12 @@ static void* client_query_thread(void *arg){
             fprintf(stderr, "error allocating T1\n");
             return NULL;
         }
-        if(benchmarking)
-            univ_start = clock();
+        bench_start();
         if(generate_beaver_triples(no_multis_bytes, T1) == -1){
             fprintf(stderr, "error in generate_beaver_triples()\n");
             return NULL;
         }
-        if(benchmarking){
-            univ_end = clock();
-            univ_final = time_calc(univ_start, univ_end);
-            printf("offline intersect: %.2f\n", univ_final);
-            if(intersect_offline_record){
-                intersect_offline_results = fopen("intersect_offline.txt", "a");
-                fprintf(intersect_offline_results, "%.2f, ", univ_final);
-                fclose(intersect_offline_results);
-            }
-        }
+        bench_end(INTERSECT_OFFLINE);
         if(intersect_version == INTERSECT_MINUS){
             if(intersectminus(n_fixed, query_len, L, no_multis_bytes, NULL, T1, &Z1, intersection_indices, t) == -1){
                 fprintf(stderr, "error in intersectminus()\n");
@@ -1586,22 +1648,12 @@ static void* client_query_thread(void *arg){
         else{
             bool q[m];
             bytestobools(q, arr, m);
-            if(benchmarking)
-                univ_start = clock();
+            bench_start();
             if(intersectfull(n_fixed, no_multis_bytes, T1, &Z1, q, t) == -1){
                 fprintf(stderr, "error in intersectfull()\n");
                 return NULL;
             }
-            if(benchmarking){
-                univ_end = clock();
-                univ_final = time_calc(univ_start, univ_end);
-                printf("online intersect: %.2f\n", univ_final);
-                if(intersect_online_record){
-                    intersect_online_results = fopen("intersect_online.txt", "a");
-                    fprintf(intersect_online_results, "%.2f, ", univ_final);
-                    fclose(intersect_online_results);
-                }
-            }
+            bench_end(INTERSECT_ONLINE);
         }
         free(T1);
     }
@@ -1625,8 +1677,8 @@ static void* client_query_thread(void *arg){
     int response_len = 1 * sizeof(uint8_t);
     uint8_t *response = malloc(response_len);
     univ_start = clock();
-    response[0] = gc_threshold_check(1, s1_total, FF_size, THRESHOLD, NULL, GCPORT);
-    //response[0] = 0;
+    //response[0] = gc_threshold_check(1, s1_total, FF_size, THRESHOLD, NULL, GCPORT);
+    response[0] = 0;
     univ_end = clock();
     univ_final = (double)(univ_end - univ_start) / CLOCKS_PER_SEC;
             printf("%.2f\n", univ_final);

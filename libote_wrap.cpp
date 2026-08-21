@@ -12,7 +12,9 @@
 
 extern "C"{
 
-std::string IP;
+std::string sendIP = "10.0.4.211:1212";
+std::string listenIP = "0.0.0.0:1212";
+
 const int maxchunk = 4096;
 
 int to_bytescpp(int no_bits){
@@ -21,8 +23,7 @@ int to_bytescpp(int no_bits){
 
 void OTeSend1(const uint8_t* messages1, const uint8_t* messages2, const int noOTs){
 	using namespace osuCrypto;
-    IP = "localhost:1212";
-	auto chl = cp::asioConnect(IP, 1);
+	auto chl = cp::asioConnect(sendIP, 1);
 	PRNG prng(sysRandomSeed());
 	IknpOtExtSender sender;
     
@@ -70,8 +71,7 @@ void OTeSend1(const uint8_t* messages1, const uint8_t* messages2, const int noOT
 
 void OTeSend32(const uint32_t* messages1, const uint32_t* messages2, const int noOTs){
     using namespace osuCrypto;
-    IP = "localhost:1212";
-    auto chl = cp::asioConnect(IP, 1);
+    auto chl = cp::asioConnect(sendIP, 1);
     PRNG prng(sysRandomSeed());
     IknpOtExtSender sender;
 
@@ -115,8 +115,7 @@ void OTeSend32(const uint32_t* messages1, const uint32_t* messages2, const int n
 
 void OTeRecv1(uint8_t* retMsgs, const uint8_t* choices, const int noOTs){
 	using namespace osuCrypto;
-    IP = "localhost:1212";
-	auto chl = cp::asioConnect(IP, 0);
+	auto chl = cp::asioConnect(listenIP, 0);
 	PRNG prng(sysRandomSeed());
 	IknpOtExtReceiver receiver;
 
@@ -181,8 +180,7 @@ void OTeRecv1(uint8_t* retMsgs, const uint8_t* choices, const int noOTs){
 
 void OTeRecv32(uint32_t* retMsgs, const uint8_t* choices, const int noOTs){
     using namespace osuCrypto;
-    IP = "localhost:1212";
-    auto chl = cp::asioConnect(IP, 0);
+    auto chl = cp::asioConnect(listenIP, 0);
     PRNG prng(sysRandomSeed());
     IknpOtExtReceiver receiver;
 

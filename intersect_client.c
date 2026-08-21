@@ -23,7 +23,7 @@
 #define L_DEFAULT 4
 #define MAX_ARRAY_ELEMENTS 4096
 #define SEND_BATCH_SIZE 256
-const static char* target_addr = "127.0.0.1";
+static char *s1_addr = "10.0.4.210", *s2_addr = "10.0.4.211";
 volatile static bool running;
 const static bool benchmarking = false;
 static int s1_fd, s2_fd;
@@ -47,8 +47,15 @@ int connect_serv(bool s){
     }
 
     serv_addr.sin_family = AF_INET;
-    if(s) serv_addr.sin_port = htons(S2PORT);
-    else serv_addr.sin_port = htons(S1PORT);
+    char *target_addr;
+    if(s){
+        serv_addr.sin_port = htons(S2PORT);
+        target_addr = s2_addr;
+    }
+    else{
+        serv_addr.sin_port = htons(S1PORT);
+        target_addr = s1_addr;
+    }
 
     // Convert IPv4 and IPv6 addresses from text to binary form
     if (inet_pton(AF_INET, target_addr, &serv_addr.sin_addr)
@@ -326,7 +333,6 @@ int query_data(){
 		printf("please provide an attribute\n");
 		return 1;
 	}
-
     query_len_bytes = tobytes(query_len);
     bool query[query_len], t1[query_len], t2[query_len];
     if(benchmarking)
@@ -365,11 +371,12 @@ int query_data(){
     int max_q_len_bytes = 16;
     int max_q_len = max_q_len_bytes * 8;
 
-    bool *t, temp[query_len];
+    bool *t, temp[line];
 	if(intersect_version == INTERSECT_MINUS || cout)
         t = query;
     else{   //set the parts of the vector not included in query to 1s
         query_len = line;
+        query_len_bytes = tobytes(query_len);
         memset(temp, 1, query_len);
         int j = 0;
         for(int i = 0; i < index_len; i++)
@@ -382,6 +389,7 @@ int query_data(){
       //  printf("t -> %d\n", t[i]);
 
     secret_share(t, t1, t2, query_len);
+
     int msg_len = 1 + max_q_len_bytes + query_len_bytes;
 
     uint8_t s1_send_buf[msg_len];
