@@ -620,20 +620,21 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
     int l = L;  //l is now the length of each subvector
     int lhalf = l - (l / 2);
     int initsize = lhalf * m * nbytes_fixed * sizeof(uint8_t);
+    int de_size = (l / 2) * m * nbytes_fixed * sizeof(uint8_t);
     uint8_t (*I2)[lhalf][nbytes_fixed] = malloc(initsize);
     if(!I2){
         fprintf(stderr, "could not allocate I1\n");
         return -1;
     }
 
-    for(int i = 0; i < m; i++)
+    /*for(int i = 0; i < m; i++)
         printf("q -> %d\n", q[i]);
     printf("\n");
     for(int i = 0; i < L * m; i++)
         printf("t -> %d\n", t[i]);
-    printf("\n");
+    printf("\n");*/
 
-    uint8_t (*d2)[m][nbytes_fixed] = malloc(initsize), (*e2)[m][nbytes_fixed] = malloc(initsize);
+    uint8_t (*d2)[m][nbytes_fixed] = malloc(de_size), (*e2)[m][nbytes_fixed] = malloc(de_size);
     uint8_t (*d1)[m][nbytes_fixed] = NULL, (*e1)[m][nbytes_fixed] = NULL;
     uint8_t (*d)[m][nbytes_fixed] = NULL, (*e)[m][nbytes_fixed] = NULL;
     if(!d2 || !e2){
@@ -661,7 +662,7 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
     uint8_t *recv_arr;
     uint64_t count;
 
-    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == initsize){
+    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == de_size){
         d1 = (void *)recv_arr;
         d = d1;
     }
@@ -669,12 +670,12 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
         fprintf(stderr, "receive d1 from s1 failed\n");
         return -1;
     }
-    if(send_8(s1_fd, (uint8_t *)d2, initsize) != 0){
+    if(send_8(s1_fd, (uint8_t *)d2, de_size) != 0){
         fprintf(stderr, "send d2 to s1 failed\n");
         return -1;
     }
 
-    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == initsize){
+    if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == de_size){
         e1 = (void *)recv_arr;
         e = e1;
     }
@@ -683,7 +684,7 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
         return -1;
     }
 
-    if(send_8(s1_fd, (uint8_t *)e2, initsize) != 0){
+    if(send_8(s1_fd, (uint8_t *)e2, de_size) != 0){
         fprintf(stderr, "send e2 to s1 failed\n");
         return -1;
     }
@@ -716,6 +717,7 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
     int jcheckpoint, spacing;
     int no_rounds = (int)ceil(log2(l));
     for(int round = 0; round < no_rounds; round++){
+        no_pairs = l / 2;
         l -= no_pairs;
         spacing = (int)pow(2, round);
         jcheckpoint = j;
@@ -730,7 +732,7 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
             }
         }
         j = jcheckpoint;
-        int sendsize = l * m * nbytes_fixed;
+        int sendsize = no_pairs * m * nbytes_fixed;
         if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == sendsize){
             d1 = (void *)recv_arr;
             d = d1;
@@ -780,19 +782,15 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
     free(e2);
 
     //z is intermediate results, Z is final
-    //uint8_t (*z2)[nbytes_fixed] = realloc(I2, m * nbytes_fixed * sizeof(uint8_t));
-    uint8_t (*z2)[nbytes_fixed] = malloc(m * nbytes_fixed * sizeof(uint8_t));
-    for(int attribute = 0; attribute < m; attribute++)
-        memcpy(z2[attribute], I2[0][attribute], nbytes_fixed);
-    free(I2);
+    uint8_t (*z2)[nbytes_fixed] = realloc(I2, m * nbytes_fixed * sizeof(uint8_t));
 
     for(int attribute = 0; attribute < m; attribute++)
         for(int i = 0; i < nbytes_fixed; i++)
             z2[attribute][i] ^= (255 * q[attribute]) ^ 255;
 
-    for(int i = 0; i < m; i++)
+    /*for(int i = 0; i < m; i++)
         printf("z -> %d\n", z2[i][0] >> 0 & 1);
-    printf("\n");
+    printf("\n");*/
 
     int intersect_indices[1];
     intersect_indices[0] = 0;
@@ -805,8 +803,8 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
         memcpy(T2_2[k], &T2[k][j], no_multis_bytes);
 
     int ret = intersectminus(n_fixed, m, m, no_multis_bytes, z2, T2_2, Z2, intersect_indices, t);
-    printf("printing Z:\n");
-    printboolvec(*Z2, n_fixed);
+    /*printf("printing Z:\n");
+    printboolvec(*Z2, n_fixed);*/
     free(z2);
     free(T2_2);
     return ret;
