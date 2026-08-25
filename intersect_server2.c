@@ -27,28 +27,9 @@
 #include <sys/eventfd.h>
 #define SPORT 8080
 #define CPORT 8082
-#define GCPORT 1212
-const static char* target_addr = "10.0.4.210";
+#define GCPORT 8083
+const static char* target_addr = "127.0.0.1";
 
- 
- /*send and receive code */
- /*   uint8_t *arr;
-    uint64_t count;
-    int rc = recv_uint8_array(new_socket, &arr, &count);
-    
-    fprintf(stderr, "recv_uint8_array returned: %d\n", rc);
-    if (rc == 0) {
-        printf("received %" PRIu64 " elements\n", count);
-        for(uint64_t i = 0; i < count; i++)
-            printf("%" PRIu8 "\n", arr[i]);
-        free(arr);
-    }
-    else{
-        fprintf(stderr, "recv failed: rc = %d errno = %s\n", rc, strerror(errno));
-    }
-    
-    if(send_uint32_array(new_socket, clientdata, 3) != 0)
-        perror("send failed");*/
 #define MAX_EVENTS      512          /* epoll events per call                */
 #define MAX_CONNECTIONS 65536        /* fd-indexed connection table size      */
 #define RECV_BUF_SIZE   4096         /* per-read stack buffer                 */
@@ -99,9 +80,9 @@ typedef enum {
 } parse_state_t;
 
 typedef struct write_chunk {
-    uint8_t         *buf;
-    size_t           len;
-    size_t           off;       // how many bytes of this chunk already sent
+    uint8_t *buf;
+    size_t len;
+    size_t off;       // how many bytes of this chunk already sent
     struct write_chunk *next;
 } write_chunk_t;
 
@@ -109,13 +90,13 @@ typedef struct {
     parse_state_t state;
 
     // Header accumulation
-    uint8_t  header_buf[8];
-    size_t   header_got;    // how many header bytes received so far
+    uint8_t header_buf[8];
+    size_t header_got;    // how many header bytes received so far
 
     // Payload accumulation
     uint64_t count;         // decoded from header
     uint8_t *payload;       // malloc'd buffer
-    size_t   payload_got;   // how many payload bytes received so far
+    size_t payload_got;   // how many payload bytes received so far
 } parser_t;
 
 typedef struct {
@@ -142,21 +123,21 @@ typedef struct {
 } query_thread_result;
 
 typedef struct result_node {
-    query_thread_result   *result;
-    struct result_node  *next;
+    query_thread_result *result;
+    struct result_node *next;
 } result_node_t;
 
 typedef struct {
-    result_node_t  *head;
-    result_node_t  *tail;
+    result_node_t *head;
+    result_node_t *tail;
 } result_queue_t;
 
-static result_queue_t  result_queue       = {NULL, NULL};
+static result_queue_t result_queue  = {NULL, NULL};
 static pthread_mutex_t result_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 static const intersect_version_t intersect_version = INTERSECT_FULL;
 
 static connection_t conn_table[MAX_CONNECTIONS];
-static int          epoll_fd  = -1;
+static int epoll_fd  = -1;
 static volatile int running   = 1;
 
 
@@ -812,32 +793,15 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T2)[no_multis_byte
 }
 
 
-static void cout_size_reduction(int batch_bytes, int max_depth, uint8_t (*S)[batch_bytes * 8], uint8_t **choices, int *js, int *js_acc){
-    //int batch_size = batch_bytes * 8;
-
-    //server2
-    //int c = 0;
+static void cout_size_reduction(int batch_bytes, int max_depth, uint8_t (*S)[batch_bytes], uint8_t **choices, int *js, int *js_acc){
     int noOTs_j = js_acc[max_depth];
     randombytes_buf((uint8_t *)S, noOTs_j * batch_bytes);
     *choices = (uint8_t *)S;
-
-    /*for(int depth = 0; depth < max_depth; depth++)
-        for(int j = 0; j < js[depth]; j++)
-            for(int i = 0; i < batch_bytes; i++)
-                choices[c++] = S[js_acc[depth] + j][i];*/
-
 }
 
 static void cout_product_sharing(int batch_bytes, uint8_t (*s)[batch_bytes], uint8_t **choices, int noOTs_bytes){
-    
-    //server2
-    //int c = 0;
     randombytes_buf((uint8_t*)s, noOTs_bytes);
     *choices = (uint8_t*)s;
-
-    /*for(int i = 0; i < batch_bytes; i++)
-        for(int j = 0; j < expon; j++)
-            choices[c++] = s[j][i];*/
 }
 
 static int couteauPrepSR(int batch_bytes, int max_depth, uint8_t (*S)[batch_bytes], uint32_t (*B)[batch_bytes * 8], int *js, int *js_acc){
@@ -958,8 +922,10 @@ static int couteauSR(int n_fixed, int max_depth, uint8_t (**YS)[tobytes(n_fixed)
         //servers exchange z1 and z2
         uint8_t *recv_arr;
         uint64_t count;
-        if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == arr_size)
+        if(receive_8(s1_fd, &recv_arr, &count) == 0 && count == arr_size){
             z1 = (void *)recv_arr;
+            z = z1;
+        }
         else{
             fprintf(stderr, "receive z1 from s1 failed\n");
             return -1;
@@ -996,8 +962,10 @@ static int couteauSR(int n_fixed, int max_depth, uint8_t (**YS)[tobytes(n_fixed)
         free(z1);
         free(z2);
     }
-    *YS = &ys[js_acc[max_depth]];
-    YS = realloc(ys, rsize * nbytes_fixed);
+    //*YS = &ys[js_acc[max_depth]];
+    *YS = malloc(rsize * nbytes_fixed);
+    memcpy(*YS, ys[js_acc[max_depth]], rsize * nbytes_fixed);
+    free(ys);
     return 0;
 }
 
@@ -1068,7 +1036,7 @@ static int couteauPS(int n_fixed, int max_depth, uint8_t **Z2, uint8_t (*YS)[tob
             acc1 ^= b[k][i] ^ (Alpha[k][i] & s[k][i]);
         for(int j = 0; j < rsize; j++)
             acc2 &= YS[j][i];
-        *Z2[i] = acc1 ^ acc2 ^ alpha[i] ^ beta[i];
+        (*Z2)[i] = acc1 ^ acc2 ^ alpha[i] ^ beta[i];
     }
 
     free(YS);
@@ -1299,24 +1267,32 @@ static int verify(uint8_t *arr){
         Z1 = recv_arr;
     else{
         fprintf(stderr, "receive Z1 from s1 failed, no. elements received = %" PRIu64 "\n", count);
+        free(Z1);
         return -1;
     }
 
-    for(int i = 0; i < m; i++)
+    for(int i = 0; i < m; i++){
         //printf("%d\n", Z1[i] ^ Z2[i]);
-        if(Z1[i] ^ Z2[i])
+        if(Z1[i] ^ !Z2[i] & 0){
+            free(Z1);
             return 0;
+        }
+    }
     printf("---------------------------------\n");
     univ_end = clock();
     univ_final = (double)(univ_end - univ_start) / CLOCKS_PER_SEC;
     printf("total time = %f\n", univ_final);
+    free(Z1);
     return 1;
 }
 
 static int client_update(uint8_t *arr, uint64_t count){
     int linebytes = tobytes(line);
-    if(count == linebytes){
-        if(!verify(arr)){ fprintf(stderr, "cheating client, the vector of all 1s is not allowed\n"); return -1;};
+    if(count == linebytes + 1){
+        if(!verify(arr)){
+            fprintf(stderr, "cheating client, the vector of all 1s is not allowed\n");
+            return -1;
+        }
         int nbyte, nbit;
         int byte = 0, bit = 0;
         indextobyteandbit(&nbyte, &nbit, n++);
@@ -1723,7 +1699,7 @@ static void handle_message(connection_t *c, uint8_t *arr, uint64_t count){
     }
     uint8_t mtype = arr[0];
     if(mtype == 0){
-        client_update(&arr[1], count - 1);
+        client_update(&arr[1], count);
         free(arr);
     }
     else if(mtype == 1) client_query(c, &arr[1], count);

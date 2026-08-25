@@ -27,7 +27,7 @@
 #include <sys/eventfd.h>
 #define SPORT 8080
 #define CPORT 8081
-#define GCPORT 1212
+#define GCPORT 8083
 
 #define MAX_EVENTS      512          //epoll events per call
 #define MAX_CONNECTIONS 65536        //fd-indexed connection table size
@@ -62,7 +62,7 @@ FILE *intersect_online_results, *intersect_offline_results, *coutFull_online_res
 *client_verify_results;
 bool intersect_online_record = true, intersect_offline_record = true, coutFull_online_record = true,
 coutFull_offline_record = true, coutHybrid_online_record = true, coutHybrid_offline_record = true,
-client_verify_record;
+client_verify_record = true;
 
 
 /*
@@ -98,9 +98,9 @@ typedef enum {
 } parse_state_t;
 
 typedef struct write_chunk {
-    uint8_t         *buf;
-    size_t           len;
-    size_t           off;       // how many bytes of this chunk already sent
+    uint8_t *buf;
+    size_t len;
+    size_t off;       // how many bytes of this chunk already sent
     struct write_chunk *next;
 } write_chunk_t;
 
@@ -141,28 +141,32 @@ typedef struct {
 } query_thread_result;
 
 typedef struct result_node {
-    query_thread_result   *result;
-    struct result_node  *next;
+    query_thread_result *result;
+    struct result_node *next;
 } result_node_t;
 
 typedef struct {
-    result_node_t  *head;
-    result_node_t  *tail;
+    result_node_t *head;
+    result_node_t *tail;
 } result_queue_t;
 
 static double time_calc(double start_time, double end_time){
     return (double)(end_time - start_time) / CLOCKS_PER_SEC;
 }
 
-static void bench_start(){
+static void bench_start(struct timespec *start){
     if(benchmarking)
-        univ_start = clock();
+        clock_gettime(CLOCK_MONOTONIC, start);
+        //univ_start = clock();
 }
 
-static void bench_end(benchmark_type_t benchmark_type){
+static void bench_end(benchmark_type_t benchmark_type, struct timespec start){
     if(!benchmarking) return;
-    univ_end = clock();
-    univ_final = time_calc(univ_start, univ_end);
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    univ_final = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    //univ_end = clock();
+    //univ_final = time_calc(univ_start, univ_end);
     switch(benchmark_type){
         case INTERSECT_ONLINE:
             if(intersect_online_record){
@@ -215,7 +219,7 @@ static pthread_mutex_t result_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 static const intersect_version_t intersect_version = INTERSECT_FULL;
 
 static connection_t conn_table[MAX_CONNECTIONS];
-static int          epoll_fd  = -1;
+static int epoll_fd  = -1;
 static volatile int running   = 1;
 
 
@@ -890,7 +894,7 @@ int intersectfull(int n_fixed, int no_multis_bytes, uint8_t (*T1)[no_multis_byte
     return ret;
 }
 
-static void cout_size_reduction(int batch_bytes, int max_depth, uint8_t (*R)[batch_bytes * 8], uint32_t (*A)[batch_bytes * 8], uint32_t *msgs1, uint32_t *msgs2, int *js, int *js_acc){
+static void cout_size_reduction(int batch_bytes, int max_depth, uint8_t (*R)[batch_bytes], uint32_t (*A)[batch_bytes * 8], uint32_t *msgs1, uint32_t *msgs2, int *js, int *js_acc){
     int batch_size = batch_bytes * 8;
 
     //server1
@@ -1068,8 +1072,10 @@ static int couteauSR(int n_fixed, int max_depth, uint8_t (**XS)[tobytes(n_fixed)
             fprintf(stderr, "send z1 to s2 failed\n");
             return -1;
         }
-        if(receive_8(s2_fd, &recv_arr, &count) == 0 && count == arr_size)
+        if(receive_8(s2_fd, &recv_arr, &count) == 0 && count == arr_size){
             z2 = (void *)recv_arr;
+            z = z2;
+        }
         else{
             fprintf(stderr, "receive z2 from s2 failed\n");
             return -1;
@@ -1099,8 +1105,10 @@ static int couteauSR(int n_fixed, int max_depth, uint8_t (**XS)[tobytes(n_fixed)
         free(z1);
         free(z2);
     }
-    *XS = &xs[js_acc[max_depth]];
-    XS = realloc(xs, rsize * nbytes_fixed);
+    //*XS = &xs[js_acc[max_depth]];
+    *XS = malloc(rsize * nbytes_fixed);
+    memcpy(*XS, xs[js_acc[max_depth]], rsize * nbytes_fixed);
+    free(xs);
     if(verbose) printf("finished couteauSR()\n");
     return 0;
 }
@@ -1175,10 +1183,11 @@ static int couteauPS(int n_fixed, int max_depth, uint8_t **Z1, uint8_t (*XS)[tob
             acc1 ^= a[k][i] ^ (Beta[k][i] & EX[k][i]);
         for(int j = 0; j < rsize; j++)
             acc2 &= 255 ^ XS[j][i];
-        *Z1[i] = acc1 ^ acc2 ^ alpha[i] ^ beta[i];
+        (*Z1)[i] = acc1 ^ acc2 ^ alpha[i] ^ beta[i];
     }
 
     free(XS);
+    free(EX);
     free(alpha);
     free(beta);
     free(Alpha);
@@ -1432,26 +1441,33 @@ static int verify(uint8_t *arr){
         Z2 = recv_arr;
     else{
         fprintf(stderr, "receive Z2 from s2 failed, no. elements received = %" PRIu64 "\n", count);
+        free(Z2);
         return -1;
     }
 
-    if(send_8(s2_fd, Z1, exp_count) != 0)
+    if(send_8(s2_fd, Z1, exp_count) != 0){
+        free(Z2);
         return -1;
+    }
 
-    for(int i = 0; i < m; i++)
+    for(int i = 0; i < m; i++){
         //printf("%d\n", Z1[i] ^ Z2[i]);
-        if(Z1[i] ^ Z2[i])
+        if(Z1[i] ^ !Z2[i] & 0){
+            free(Z2);
             return 0;
+        }
+    }
     printf("---------------------------------\n");
     univ_end = clock();
     univ_final = (double)(univ_end - univ_start) / CLOCKS_PER_SEC;
     printf("total time = %f\n", univ_final);
+    free(Z2);
     return 1;
 }
 
 static int client_update(uint8_t *arr, uint64_t count){
     int linebytes = tobytes(line);
-    if(count == linebytes){
+    if(count == linebytes + 1){
         if(!verify(arr)){
             fprintf(stderr, "cheating client, the vector of all 1s is not allowed\n");
             return -1;
@@ -1571,7 +1587,7 @@ static void* client_query_thread(void *arg){
                 return NULL;
             }
 
-            bench_start();
+            //bench_start();
             if(generate_beaver_triples(no_multis_bytes, T1) == -1){
                 fprintf(stderr, "error in generate_beaver_triples()\n");
                 return NULL;
@@ -1580,14 +1596,14 @@ static void* client_query_thread(void *arg){
                 fprintf(stderr, "error in couteauPrep()\n");
                 return NULL;
             }
-            bench_end(COUTHYBRID_OFFLINE);
+            //bench_end(COUTHYBRID_OFFLINE);
 
-            bench_start();
+            //bench_start();
             if(couteauHybridET(n_fixed, depth, &Z1, R, A, no_multis_bytes, T1, intersection_indices, t, js, js_acc) == -1){
                 fprintf(stderr, "error in couteauHybridET()\n");
                 return NULL;
             }
-            bench_end(COUTHYBRID_ONLINE);
+            //bench_end(COUTHYBRID_ONLINE);
             free(R);
             free(A);
             free(T1);
@@ -1606,19 +1622,19 @@ static void* client_query_thread(void *arg){
                 return NULL;
             }
 
-            bench_start();
+            //bench_start();
             if(couteauPrep(nbytes_fixed, depth, R, A, r, a, js, js_acc) == -1){
                 fprintf(stderr, "error in couteauPrep()\n");
                 return NULL;
             }
-            bench_end(COUTFULL_OFFLINE);
+            //bench_end(COUTFULL_OFFLINE);
 
-            bench_start();
+           // bench_start();
             if(couteauET(n_fixed, depth, &Z1, R, A, r, a, intersection_indices, t, js, js_acc) == -1){
                 fprintf(stderr, "error in couteauET()\n");
                 return NULL;
             }
-            bench_end(COUTFULL_ONLINE);
+            //bench_end(COUTFULL_ONLINE);
 
             free(r);
             free(a);
@@ -1633,12 +1649,18 @@ static void* client_query_thread(void *arg){
             fprintf(stderr, "error allocating T1\n");
             return NULL;
         }
-        bench_start();
+        //bench_start(NULL);
+       /* fprintf(stderr, "starting offline(2s)\n");
+        sleep(1);
+        fprintf(stderr, "starting offline(1s)\n");
+        sleep(1);
+        fprintf(stderr, "go\n");*/
         if(generate_beaver_triples(no_multis_bytes, T1) == -1){
             fprintf(stderr, "error in generate_beaver_triples()\n");
             return NULL;
         }
-        bench_end(INTERSECT_OFFLINE);
+        fprintf(stderr, "finishing offline\n");
+        //bench_end(INTERSECT_OFFLINE, NULL);
         if(intersect_version == INTERSECT_MINUS){
             if(intersectminus(n_fixed, query_len, L, no_multis_bytes, NULL, T1, &Z1, intersection_indices, t) == -1){
                 fprintf(stderr, "error in intersectminus()\n");
@@ -1646,14 +1668,15 @@ static void* client_query_thread(void *arg){
             }
         }
         else{
+            struct timespec start;
             bool q[m];
             bytestobools(q, arr, m);
-            bench_start();
+            bench_start(&start);
             if(intersectfull(n_fixed, no_multis_bytes, T1, &Z1, q, t) == -1){
                 fprintf(stderr, "error in intersectfull()\n");
                 return NULL;
             }
-            bench_end(INTERSECT_ONLINE);
+            bench_end(INTERSECT_ONLINE, start);
         }
         free(T1);
     }
@@ -1849,7 +1872,7 @@ static void handle_message(connection_t *c, uint8_t *arr, uint64_t count){
     }
     uint8_t mtype = arr[0];
     if(mtype == 0){
-        client_update(&arr[1], count - 1);
+        client_update(&arr[1], count);
         free(arr);
     }
     else if(mtype == 1) client_query(c, &arr[1], count);
