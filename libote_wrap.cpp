@@ -12,8 +12,8 @@
 
 extern "C"{
 
-std::string sendIP = "10.0.4.211:1212";
-std::string listenIP = "0.0.0.0:1212";
+std::string sendIP = "localhost:1212";
+std::string listenIP = "localhost:1212";
 
 const int maxchunk = 4096;
 

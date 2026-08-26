@@ -23,7 +23,7 @@
 #define L_DEFAULT 4
 #define MAX_ARRAY_ELEMENTS 4096
 #define SEND_BATCH_SIZE 256
-static char *s1_addr = "10.0.4.210", *s2_addr = "10.0.4.211";
+static char *s1_addr = "127.0.0.0", *s2_addr = "127.0.0.0";
 volatile static bool running;
 const static bool benchmarking = false;
 static int s1_fd, s2_fd;
@@ -35,7 +35,7 @@ typedef enum {
 } intersect_version_t;
 
 static const intersect_version_t intersect_version = INTERSECT_FULL;
-static const bool cout = false;
+static const bool cout = true;
 
 //connect to server s
 int connect_serv(bool s){
